@@ -1,0 +1,19 @@
+Datetime,status,daynight
+9/1/2023 10:05,exposed,day
+9/1/2023  14:20:00 PM,submerged,day
+9/1/2023 22:50,exposed,night
+9/2/2023 14:50,submerged,night
+9/2/2023 10:05,exposed,day
+9/2/2023  14:50:00 PM,submerged,day
+9/2/2023  23:35:00 PM,exposed,night
+9/3/2023 1:05,submerged,night
+9/3/2023 10:20,exposed,day
+9/3/2023 14:35,submerged,day
+9/4/2023 0:05,exposed,night
+9/4/2023 3:35,submerged,night
+9/4/2023 12:35,exposed,day
+9/4/2023  15:35:00 PM,submerged,day
+9/5/2023 1:05,exposed,night
+9/5/2023 3:35,submerged,night
+9/5/2023 13:35,exposed,day
+9/5/2023  15:20:00 PM,submerged,day

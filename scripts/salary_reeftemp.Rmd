@@ -1,7 +1,7 @@
 ---
-title: "Salary Logger Exploration"
+title: "Spatial and Seasonal Thermal Microclimate Variability in Reef Fisheries Zones on the Southwestern Coast of Madagascar Analysis"
 author: "Andrew Villeneuve"
-date: "2024-11-10"
+date: "2025-09-09"
 output: html_document
 bibliography: references.bib
 ---
@@ -385,12 +385,12 @@ dev.off()
 ```{r,echo=F,warning=F}
 
 #data readin
-eb.files<-list.files('C:/Users/drewv/OneDrive - USNH/Documents/0_People/GradStudents/DrewVilleneuve/salary_loggers/envlogger_data')
+eb.files<-list.files('data/logger_data')
 site.list<-c("saleb1_bommie","saleb10_chezFred","saleb3_rubble","saleb5_lagoon","saleb8_flat")
 site.id<-c("SALEB1","SALEB10","SALEB3","SALEB5","SALEB8")
 t.vec<-vector("list",length=length(eb.files))
 for (i in 1:length(eb.files)){
-  log<-read.csv(paste0("C:/Users/drewv/OneDrive - USNH/Documents/0_People/GradStudents/DrewVilleneuve/salary_loggers/envlogger_data/",eb.files[i]),
+  log<-read.csv(paste0("data/logger_data",eb.files[i]),
                 header = FALSE, skip = 35)
   
   #assign colnames 
@@ -439,11 +439,16 @@ Below we explore each grouping in isolation.
 
 We collected air temperature from a logger attached to a post at Salary Diving bungalow. There appears to be minimal direct solar interference based on our comparison with downscaled temperature data from era5 data sources.
 
+Note that you will need to register your email (user ID) for EXMWF Climate Data Store API. Follow the vignette in `mcera5` package for more details `r vignette("mcera5_vignette",package = "mcera5")`.
+
+When I was using this pipeline, I had to combine .nc files into a single .nc file at the end of the pipeline. If you need to do this, check out Climate Data Operators [(CDO)](https://code.mpimet.mpg.de/projects/cdo) to accomplish this in the command line. 
+
+
 ```{r,echo=F,warning=F,include=F}
 
-uid <- "andrewrvilleneuve@gmail.com"
+uid <- "<your email here>"
 
-cds_access_token <- "2f68e926-d753-4d73-90c1-5a5102c239e1"
+cds_access_token <- "<your cds access token here>"
 
 
 ecmwfr::wf_set_key(user = uid,
@@ -473,7 +478,7 @@ req <- build_era5_request(xmin = xmn, xmax = xmx,
                           outfile_name = file_prefix)
 
 request_era5(request = req, uid = uid, out_path = file_path,overwrite = T,combine=T)
- #we moved the resultant file to the era_data folder
+ #we moved the resultant file to an era_data folder
 
 ##########################################
 
@@ -623,6 +628,8 @@ summary(air_mod)
 
 # Water Temperatures
 
+This first chunk collects the OISST temperature data using the `re`
+
 ```{r,echo=F,warning=F,eval=F,results='hide'}
 
 #OISST data
@@ -663,7 +670,7 @@ write.csv(sat_sst,"sat_sst.csv")
 #| echo: false
 
 #copernicus sst data GLOBAL_ANALYSISFORECAST_PHY_001_024 from 0.49m depth
-cop_mada<-terra::rast("cop_sst.nc")
+cop_mada<-terra::rast("data/cop_sst.nc")
 cop_mada_ext<-terra::extract(cop_mada,y=cbind(43.25,-22.6),method="simple")
 datetime<-terra::time(cop_mada)
 
@@ -1425,6 +1432,8 @@ ggplot()+
 ## Tidal Influence
 
 We can finally take a look at the influence of tides in the area. I used tidal analysis software in python to derive predictions for our area of interest. It is worth noting that these models are not able to account for complex water movements close to shore, especially in lagoon areas where reefs form a barrier to water movement.
+
+To obtain the two tide_prediction files for the years 2023 and 2024, you will need to run the mada_TMD.ipynb Jupyter notebook. 
 
 ```{r,echo=F,warning=F}
 
