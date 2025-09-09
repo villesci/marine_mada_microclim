@@ -1,0 +1,20 @@
+name: C:\Users\drewv\anaconda3\envs\tide_env
+channels:
+  - defaults
+dependencies:
+  - ipykernel
+  - cartopy
+  - jupyterlab
+  - notebook
+  - nb_conda_kernels
+  - pip
+  - pyproj
+  - ipyleaflet
+  - jupyter_contrib_nbextensions
+  - ipympl
+  - netcdf4
+  - ffmpeg
+  - ipywidgets
+  - h5py
+  - pytmd
+prefix: C:\Users\drewv\anaconda3\envs\tide_env

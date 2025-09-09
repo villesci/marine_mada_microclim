@@ -1,0 +1,2639 @@
+---
+title: "Salary Logger Exploration"
+author: "Andrew Villeneuve"
+date: "2024-11-10"
+output: html_document
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+require(ggplot2)
+require(suntools)
+require(tidyverse)
+require(ggpubr)
+require(leaflet)
+require(plotly)
+require(ggmap)
+require(leaflet.extras)
+require(viridis)
+require(ggpmisc)
+require(ggrepel)
+require(gghighlight)
+require(kableExtra)
+require(emmeans)
+require(mcera5,attach.required=T)
+require(zoo)
+require(MetBrewer)
+require(ggsignif)
+require(sdmpredictors)
+library(ggspatial)
+library(raster)
+require(mapdata)
+require(ecmwfr)
+require(microclima)
+require(maptools)
+require(rerddap)
+require(NicheMapR)
+require(devtools)
+require(WaveletComp)
+require(ncdf4)
+require(curl)
+require(maps)
+require(keyring)
+require(abind)
+require(lubridate)
+require(tidync)
+require(sf)
+require(cowplot)
+require(microctools)
+
+
+site_data<-read.csv('site_data.csv')
+fishery_sites<-read.csv('fishing_coords.csv')
+towns<-read.csv('towns.csv')
+
+site_data$logger_start_date<-as.POSIXct(site_data$logger_start_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
+site_data$deploy_date<-as.POSIXct(site_data$deploy_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
+site_data$recovery_date<-as.Date(site_data$recovery_date,format="%m/%d/%Y")
+
+#tidefindR function
+
+
+#the function. Make sure your inputs 
+#tidefindR function
+tide_findR<-function(max_hour, #single numerica value
+                     interval_minute,#single numeric value
+                     tide_data, #site, height (m), datetime (posixct, 15 minute interval. xTide preferred)
+                     submergence_data,# datetime (posixct), (exposure_time (h:m:s) can be helpful, exposed. Extracted from temp logger data)
+                     temp_data) #datetime (posixct),temp (numeric),site (character)
+{
+
+  #because we extracted submergence data on minute intervals, we need to interpolate the tide data to minutes
+  tide_data_interp<-data.frame("datetime"=seq.POSIXt(min(tide_data$datetime),max(tide_data$datetime),by="min"))
+  tide_data_interp<-left_join(tide_data_interp,tide_data,by="datetime")
+  tide_data_interp$site<-unique(tide_data$site)
+  tide_data_interp$height<-na.approx(tide_data_interp$height)
+  
+  #limit our ssq analysis to a smaller dataset
+  tide_data_small<-tide_data_interp%>%
+    dplyr::filter(datetime>=min(submergence_data)-lubridate::hours(12) & 
+                    datetime<=max(submergence_data)+lubridate::hours(12))
+  #################################################################################################
+  hour_seq<-seq(0,max_hour*60,by=interval_minute)
+  heights_vec<-vector("list",length=length(hour_seq))
+  new_tides_vec<-vector("list",length=length(hour_seq))
+  
+  #now, let's create a bunch of dataframes with offset datetime stamps to find optimal height and time offset with sum of squares
+  for (i in 1:length(hour_seq)) {
+    # Create a new datetime by adding the offset
+    new_tide <- tide_data_small %>%
+      mutate(newdatetime = datetime + minutes(hour_seq[i]),
+             offset = hour_seq[i])
+    
+    # Filter new heights based on updated datetimes matching submergence_data
+    new_heights <- new_tide %>%
+      dplyr::filter(newdatetime %in% submergence_data) %>%
+      dplyr::select(newdatetime, height)
+    
+    # Create a dataframe with corresponding original datetime
+    new_heights_df <- data.frame(
+      datetime = new_heights$newdatetime[new_heights$newdatetime %in% submergence_data],
+      newdatetime = new_heights$newdatetime,
+      height = new_heights$height,
+      offset = hour_seq[i]
+    )
+    
+    heights_vec[[i]] <- new_heights_df
+    new_tides_vec[[i]] <- new_tide
+  }
+  
+  
+  all_heights<-bind_rows(heights_vec)
+  all_tides<-bind_rows(new_tides_vec)
+  
+  
+  ssq_offset<-all_heights%>%
+    group_by(offset)%>%
+    summarise(ssq=sum((height-mean(height))^2))
+  
+  indices<-which(diff(sign(diff(ssq_offset$ssq)))==2)+1 
+  #all timestamps with the best offset
+  minimal_offsets<-ssq_offset[indices,]
+  
+  #Minima here is the least ssq of data from predicted tide height
+  plot(ssq_offset$offset,ssq_offset$ssq)
+  points(minimal_offsets$offset,minimal_offsets$ssq,col="red")
+  
+  ######################################################
+  #this is the time in minutes that we add to the tide station to get our logger
+  my_offset<-as.numeric(ssq_offset[indices[1],1])
+  #this is our adjusted tide df
+  optimal_tide<-all_tides%>%
+    dplyr::filter(offset==my_offset)
+  #this is our adjusted submergence time df
+  optimal_heights<-all_heights%>%
+    dplyr::filter(offset==my_offset)
+  #this is the non-adjusted, original submergence time and height df
+  original_heights<-all_heights%>%
+    dplyr::filter(offset==0)
+  rm(all_tides)
+  rm(all_heights)
+  ###############################################################
+  
+  #interp_dates<-data.frame("newdatetime"=seq.POSIXt(from=min(optimal_tide$newdatetime),
+  #                                                  to=max(optimal_tide$newdatetime),
+  #                                                  by="min"))
+#
+  #  optimal_tide_inter<- merge(interp_dates, optimal_tide, by = "newdatetime", all.x = TRUE)
+  #optimal_tide_inter <- optimal_tide_inter %>% distinct(newdatetime, .keep_all = TRUE)
+  #optimal_tide_inter$height<-na.approx(optimal_tide_inter$height,na.rm=F)
+  #optimal_tide_inter$datetime<-seq.POSIXt(from=min(na.omit(optimal_tide_inter$datetime)),
+  #                                        to=max(na.omit(optimal_tide_inter$datetime)),
+  #                                        by="min")
+  #optimal_tide_inter$offset<-unique(optimal_tide$offset)
+  #optimal_tide_inter$site<-unique(optimal_tide$site)
+  
+  
+  logger_height<-mean(optimal_heights$height)
+  #logger_height<-.5
+  
+  optimal_tide$status<-with(optimal_tide,ifelse(height>logger_height,"submerged","exposed"))
+  
+  tide_data$status<-with(tide_data,ifelse(height>logger_height,"submerged","exposed"))
+  ####################################################################################
+  # now we need to 1) add the offset to our entire tidal series, 2) na.approx our temp data, and 3) left_join with temp data
+  #1
+  tide_data_interp<-tide_data_interp%>%
+    rename("olddatetime"="datetime")%>%
+    mutate("datetime"=olddatetime+minutes(my_offset))
+  tide_data_interp$status<-with(tide_data_interp,ifelse(height>logger_height,"submerged","exposed"))
+  #2
+  #keep actual obs
+  temp_data$type<-"original"
+  temp_data_interp<-data.frame("datetime"=seq.POSIXt(min(temp_data$datetime),max(temp_data$datetime),by="min"),type="interp")
+  temp_data_interp <- left_join(temp_data_interp, temp_data, by = "datetime") %>%
+    mutate(type = coalesce(type.y, type.x)) %>% # Prioritize original type if available
+    dplyr::select(-type.x, -type.y) 
+  temp_data_interp$temp<-na.approx(temp_data_interp$temp)
+  #3
+  temp_data_status<-left_join(temp_data_interp,tide_data_interp[,c("datetime","status")],by="datetime")
+  temp_data_status$site<-unique(temp_data$site)
+  
+  points<-rbind(optimal_heights,original_heights)
+  points$offset<-as.factor(points$offset)
+  shape_values <- setNames(c(3, 16), levels(points$offset))
+  shape_labels <- setNames(c("Original", "Local"), levels(points$offset))
+  
+  plot<-ggplot()+
+    geom_line(data=optimal_tide,aes(x=datetime,y=height,group=1),linetype="dotted")+
+    geom_line(data=optimal_tide,aes(x=newdatetime,y=height,group=1,color=status))+
+    geom_point(data=points,aes(x=datetime,y=height,shape=offset))+
+    #geom_point(data=original_heights,aes(x=datetime,y=height),shape=3)+
+    geom_hline(yintercept=logger_height,linetype="dashed",color="red")+
+    scale_x_datetime(date_breaks ="24 hours",date_labels="%b %d %H:%M")+
+    labs(y="Height (m)",x="",title=unique(tide_data$site),color="Logger Status",shape="Tide Location")+
+    theme_linedraw()+
+    scale_color_manual(values=c("exposed"="firebrick","submerged"="darkblue"),
+                       labels=c("Exposed","Submerged"))+
+    scale_shape_manual(values=shape_values,
+                       labels=shape_labels)+
+    annotate("label",x=min(optimal_tide$datetime)+hours(12),y=logger_height+0.15,label=paste0("Logger Height = ",round(logger_height,2),"m"),color="red")
+  
+  temp_data_status<-na.omit(temp_data_status)
+  
+  plot2<-ggplot(data=temp_data_status,aes(x=datetime,y=temp,color=status,group=1))+
+    geom_line(alpha=0.4)+
+     theme_linedraw()+
+    scale_color_manual(values=c("exposed"="firebrick","submerged"="darkblue"),
+                       labels=c("Exposed","Submerged"))+
+    labs(color="Logger Status",y="Temp (⁰C)",title=unique(temp_data_status$site))+
+    scale_x_datetime(date_breaks ="2 months",date_labels="%b %Y" )
+  
+  print(list(plot,plot2))
+  
+  return(list(
+    datums=c(paste0("Minute Offset: +", as.numeric(ssq_offset[indices[1], 1]), " min"),
+             paste0("Height of Logger: ", round(logger_height,3)," m")),
+    tide_data=optimal_tide,
+    temp_data=temp_data_status
+  ))
+  
+  print(result$datums)
+  print(result$tide_data)
+  print(results$temp_data)
+}
+
+
+
+```
+
+## Deployment Map
+
+```{r,echo=F,warning=F}
+
+
+# Create a color palette
+colors <- c("red", "green")
+pal <- colorFactor(colors, domain = c(FALSE, TRUE))
+
+# Add small random jitter to coordinates
+set.seed(123)  # for reproducibility
+jitter_amount <- 0.0001  # Adjust this value as needed
+site_data_clean <- site_data %>%
+  mutate(
+    longitude_jitter = longitude + runif(n(), -jitter_amount, jitter_amount),
+    latitude_jitter = latitude + runif(n(), -jitter_amount, jitter_amount)
+  )
+
+leaflet(site_data_clean) %>%
+  addProviderTiles(providers$Esri.WorldImagery) %>%
+  addCircleMarkers(
+    ~longitude_jitter, ~latitude_jitter,
+    color = ~pal(!is.na(recovery_date)),
+    radius = 6,
+    fillOpacity = 0.5,  # Increased transparency
+    stroke = F,
+    weight = 1,
+    opacity = 0.8,
+    popup = ~paste("Site:", code, "<br>",
+                   "Zone:", zone, "<br>",
+                   "Deploy Date:", deploy_date, "<br>",
+                   "Recovery Date:", ifelse(is.na(recovery_date), "Not recovered", recovery_date)),
+    label = ~code,
+    clusterOptions = markerClusterOptions(
+      spiderfyOnMaxZoom = F,
+       maxClusterRadius = 5,
+      spiderLegPolylineOptions = list(weight = 1.5, color = "#222", opacity = 0.5),
+      zoomToBoundsOnClick = TRUE
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = !is.na(site_data$recovery_date),
+    title = "Recovery Status",
+    labels = c("Not Recovered", "Recovered")
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addMiniMap(
+    tiles = providers$Esri.WorldStreetMap,
+    toggleDisplay = TRUE
+  )
+```
+
+```{r,echo=F,eval=T,warning=F,results='hide'}
+library(tmaptools)
+library(tmap)
+library(stars)
+
+
+
+lat_range <- range(site_data$latitude) + c(-0.02, 0.02)
+lon_range <- range(site_data$longitude) + c(-0.05, 0.05)
+site_sf <- st_as_sf(site_data, coords = c("longitude", "latitude"), crs = 4326)
+study_area_sf<-as(extent(c(lon_range[1], lon_range[2], lat_range[1], lat_range[2])), "SpatialPolygons")
+crs(study_area_sf)<-CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+#downlaod sat data
+sat <- read_osm(study_area_sf, type = "esri-imagery", zoom = 15)
+sat <- as(sat, "Raster")
+sat <- projectRaster(sat, crs = CRS("+proj=longlat +datum=WGS84 +no_defs"), method = "ngb")
+df <- na.omit(as.data.frame(sat, xy = T))
+
+site_data$recovered<-ifelse(is.na(site_data$recovery_date),F,T)
+site_data_noair<-site_data%>%filter(!id=="SALEB10")
+
+
+  site_data_noair_sf<-st_as_sf(site_data_noair, coords = c("longitude", "latitude"), crs = 4326)
+  towns_sf<-st_as_sf(towns, coords = c("lon", "lat"), crs = 4326)
+  fishery_sites_sf<-st_as_sf(na.omit(fishery_sites), coords = c("Long", "Lat"), crs = 4326)
+
+site_map<-ggplot() +
+geom_raster(data = df, aes(x = x, y = y), fill = rgb(df$red, df$green, df$blue, maxColorValue = 255)) +
+scale_fill_identity() +
+geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
+  geom_sf(data = towns_sf,  color = "black", shape = 22, fill = "white") +
+geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.01) +
+geom_sf(data = (site_data_noair_sf),
+        aes(fill = zone, color = recovered, size = recovered), shape = 21, stroke = 1) +
+ggrepel::geom_label_repel(
+    data = (site_data_noair_sf),aes(label = id, color=recovered,geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 0,
+    box.padding = 0.5,xlim=c(43.27,43.32)
+  ) + 
+theme_minimal() +
+labs(x = "Longitude", y = "Latitude", fill = "Zone", color = "Recovery Status", size = "Recovery Status") +
+coord_sf(xlim = c(min(df$x), max(df$x)), ylim = c(min(df$y), max(df$y)), expand = FALSE) +
+scale_fill_manual(values = c("Lagoon" = "green", "Reef Flat" = "red", "Forereef" = "purple", "Backreef" = "blue")) +
+scale_color_manual(values = c("FALSE" = "darkgray", "TRUE" = "black")) +
+scale_size_manual(values = c("FALSE" = 1.5, "TRUE" = 3)) +
+annotation_scale( location = "br",bar_cols = c("darkgray", "white"))+
+annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_fancy_orienteering(fill= c("darkgray", "white"),line_col="darkgray"))
+site_map
+#inset map
+
+
+#shapefile of MAd
+MAD <- maps::map("worldHires", c("Madagascar"),fill=T,plot=F)
+#put shpaefule into spatial polygons
+mad.sp<-map2SpatialPolygons(MAD,IDs = MAD$names,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+mad.ext <- raster::extent(42.143555,50.976563,-26.588527,-11.070603)
+mat.sp.crop<-raster::crop(mad.sp,mad.ext)
+mad.st<-sf::st_as_sf(mat.sp.crop)
+#load all sst data
+sstmean<-load_layers("BO_sstmean")
+
+mad.crop.sst <- raster::crop(sstmean, mad.ext)
+
+inset<-mad.crop.sst%>%
+rasterVis::gplot()+
+  geom_raster(aes(x = x, y = y,fill=value),stat='identity') +
+  scale_fill_viridis_c(option="H",na.value="transparent") +
+  coord_quickmap(expand = F)+
+  geom_sf(data=mad.st,inherit.aes=F,fill="antiquewhite")+
+   theme(legend.key.size = unit(.1, 'cm'))+
+  theme_void()+
+  labs(x = NULL, y = NULL, fill = "Mean SST (°C)")+
+  geom_point(aes(x=mean(lon_range),y=mean(lat_range)),color="black",size=2,shape=8,inherit.aes=F)+
+  annotation_scale()
+inset_leg<-get_legend(inset)
+inset_noleg<-inset_leg+
+  theme(
+      legend.position="none",
+      legend.title = element_text(color = "white"),
+      legend.text = element_text(color = "white")
+      )
+
+df<-tibble(x=43.2,y=-22.6,
+       plot=list(inset))
+aaa<-site_map+geom_plot(data=df,aes(x,y,label=plot))
+
+pdf(file="figures/sitemap_raw.pdf",height=9,width=9)
+#plot_grid(aaa,site_map,rel_widths=c(1,.2))
+aaa
+dev.off()
+
+
+
+
+```
+
+
+# All Logger all dates temperatures
+
+```{r,echo=F,warning=F}
+
+#data readin
+eb.files<-list.files('C:/Users/drewv/OneDrive - USNH/Documents/0_People/GradStudents/DrewVilleneuve/salary_loggers/envlogger_data')
+site.list<-c("saleb1_bommie","saleb10_chezFred","saleb3_rubble","saleb5_lagoon","saleb8_flat")
+site.id<-c("SALEB1","SALEB10","SALEB3","SALEB5","SALEB8")
+t.vec<-vector("list",length=length(eb.files))
+for (i in 1:length(eb.files)){
+  log<-read.csv(paste0("C:/Users/drewv/OneDrive - USNH/Documents/0_People/GradStudents/DrewVilleneuve/salary_loggers/envlogger_data/",eb.files[i]),
+                header = FALSE, skip = 35)
+  
+  #assign colnames 
+  colnames(log)<-c("datetime","temp")
+  
+  log$datetime <- as.POSIXct(log$datetime, tryFormats=c('%m/%d/%Y %H:%M','%Y-%m-%d %H:%M:%S'),tz="Africa/Addis_Ababa") + lubridate::hours(3) #toliara is +3 UTC
+  log$site<-site.list[i]
+  log$id<-site.id[i]
+  t.vec[[i]]<-log
+}
+
+salary_temps<-bind_rows(t.vec)
+
+
+
+salary_temps <- salary_temps %>%
+  left_join(site_data %>% dplyr::select(id, recovery_date,deploy_date), by = "id") %>%
+  group_by(id) %>%
+  filter(datetime < recovery_date | is.na(recovery_date)) %>%
+  filter(datetime > deploy_date )%>%
+  ungroup()
+
+
+```
+
+
+```{r,echo=F,warning=F}
+ggplot(data=salary_temps,aes(x=datetime,y=temp,group=site,color=site))+
+  geom_line()+theme_linedraw()+facet_wrap(.~site)+labs(x="Date",y="Temp (⁰C)")
+
+#plot_ly(data=salary_temps%>%filter(site=="saleb5_lagoon"),x=~datetime,y=~temp,type='scatter',mode='lines')
+```
+
+We can group the data into three groups:
+
+1.  Air temperature (saleb10_chezFred)
+
+2.  Water temperature (saleb1_bommie, saleb3_rubble, saleb4_lagoon)
+
+3.  Intertidal temperature (saleb8_flat)
+
+
+Below we explore each grouping in isolation.
+
+# Air Temperature
+
+We collected air temperature from a logger attached to a post at Salary Diving bungalow. There appears to be minimal direct solar interference based on our comparison with downscaled temperature data from era5 data sources.
+
+```{r,echo=F,warning=F,include=F}
+
+uid <- "andrewrvilleneuve@gmail.com"
+
+cds_access_token <- "2f68e926-d753-4d73-90c1-5a5102c239e1"
+
+
+ecmwfr::wf_set_key(user = uid,
+                   key = cds_access_token)
+
+xmn <- 41
+xmx <- 47
+ymn <- -26
+ymx <- -20
+
+# temporal extent
+st_time <- as.POSIXlt("2023-07-30 12:15", tz = "EAT")
+en_time_air <- as.POSIXlt("2024-08-06 23:45",  tz = "EAT")
+
+
+# Set a unique prefix for the filename (here based on spatial
+# coordinates), and the file path for downloaded .nc files
+file_prefix <- "era5_41_47_-26_-20"
+file_path <- getwd()
+
+
+# build a request (covering multiple years)
+req <- build_era5_request(xmin = xmn, xmax = xmx, 
+                          ymin = ymn, ymax = ymx,
+                          start_time = st_time,
+                          end_time = en_time_air,
+                          outfile_name = file_prefix)
+
+request_era5(request = req, uid = uid, out_path = file_path,overwrite = T,combine=T)
+ #we moved the resultant file to the era_data folder
+
+##########################################
+
+
+  #all years nc
+  nc_file <- "era5_41_47_-26_-20_202.nc"
+  my_nc<-paste0(file_path,"/",nc_file)
+  
+  y<- -22.55423
+  x<- 43.285767
+  clim_point_air<-extract_clim(nc = my_nc,
+                           long = x,
+                           lat = y,
+                           start_time = st_time,
+                           end_time = en_time_air,
+                           format = "microclima")
+  clim_point_air$obs_time<-as.POSIXct(clim_point_air$obs_time,tz = "Africa/Addis_Ababa")
+  
+  precip_point_air <- extract_precip(nc = my_nc, long = x, lat = y,
+                                    start_time = st_time,  
+                                    end_time = en_time_air,
+                                    convert_daily = F)
+  precip_air<-data.frame("precip"=precip_point_air,
+                     "obs_time" = seq.POSIXt(from=as.POSIXct("2023-07-30 16:00:00"),to=as.POSIXct("2024-08-07 02:00:00"),by="hour",tz="Africa/Addis_Ababa"))
+
+  clim_point_allair<-left_join(clim_point_air,precip_air,by='obs_time')
+  
+  write.csv(clim_point_allair,'clim_point_allair.csv')
+
+```
+
+```{r,echo=F,warning=F}
+
+clim_point_allair<-read.csv('clim_point_allair.csv')
+
+  clim_point_allair$obs_time<-as.POSIXct(clim_point_allair$obs_time,tz = "Africa/Addis_Ababa",format="%Y-%m-%d %H:%M:%S")
+  clim_point_allair$id<-"era5"
+  clim_point_allair<-clim_point_allair%>%rename("temp"="temperature")
+  
+  #mean air hourly temperatures from chez Fred
+  hourly_fred<-salary_temps %>% 
+    dplyr::filter(site == "saleb10_chezFred")%>%
+    mutate(hour = floor_date(datetime, "hour")) %>%
+    group_by(hour)%>%
+    summarise(mean_temp = mean(temp, na.rm = TRUE), .groups = "drop")%>%
+    rename("temp"="mean_temp", "datetime"="hour")
+
+ # Create a combined data frame for plotting
+combined_data <- bind_rows(
+  clim_point_allair %>% dplyr::select(obs_time, temp) %>% mutate(id = "ERA5"),
+  hourly_fred %>% 
+    rename(obs_time = datetime) %>% 
+    mutate(id = "Saleb10_ChezFred"))
+
+# Plot with a legend
+airtempsplot<-ggplot(data = combined_data) +
+  geom_line(aes(x = obs_time, y = temp, color = id), alpha = 0.4) +
+  theme_linedraw() +
+  scale_color_manual(values=c("ERA5"="darkorange","Saleb10_ChezFred"="navy"),labels=c("ERA5","Air Temperature Logger \n(SALEB10)"))+
+  labs(x = "Date", y = "Temp (⁰C)", color = "Dataset")  # Legend title
+
+airtempsplot
+
+combined_data_wide<-combined_data%>%
+  tidyr::pivot_wider(names_from = id,values_from = temp)
+
+combined_data_wide <- combined_data_wide %>%
+  mutate(
+    ERA5 = purrr::map_dbl(ERA5, ~ ifelse(length(.) > 0, .[1], NA_real_)),
+    Saleb10_ChezFred = purrr::map_dbl(Saleb10_ChezFred, ~ ifelse(length(.) > 0, .[1], NA_real_)),
+    residuals = abs(Saleb10_ChezFred-ERA5)
+  )
+
+airmod<-lm(Saleb10_ChezFred ~ ERA5, data=combined_data_wide)
+summary(airmod)
+
+air_cor<-ggplot(data = combined_data_wide,aes(x = ERA5, y = Saleb10_ChezFred,color=residuals)) +
+  geom_point(alpha = 0.3) +
+  theme_linedraw() +
+   labs(x = "ERA5 (°C)", y = "SALEB10 Air Temperature (°C)", color = "Residuals (°C)") +
+  scale_color_viridis_c(option="inferno")+
+  geom_abline(color = "red",intercept=0,slope=1) +
+  annotate(geom = 'label', x = 17, y = 43, 
+           label = bquote("R^2 == 0.84"), parse = TRUE)+
+  geom_textabline(intercept = 0, slope = 1, label = "1:1 Line",color="red",vjust=1,hjust=.1) +
+    geom_textabline(intercept = airmod$coefficients[1], slope = airmod$coefficients[2], label = "Linear Regression",color="blue",vjust=-1,hjust=.85)
+  air_cor
+
+ggsave("figures/airtemp_correlation.png",air_cor,width=6,height=4,bg="transparent")
+```
+
+
+
+
+We can also think about how other meterological factors affect air temperature, such as cloud cover and storm events. This can be explored more, and we may be able to get modelled wave data as well.
+
+```{r,echo=F,warning=F}
+
+wind<-ggplot(data=clim_point_allair)+
+  geom_line(aes(x=obs_time,y=windspeed))+
+  labs(x="Date",y="Wind Speed (km/h)")+
+  theme_minimal()
+cloudc<-ggplot(data=clim_point_allair)+
+  geom_line(aes(x=obs_time,y=cloudcover))+
+  labs(x="Date",y="Cloud Cover (%)")+
+  theme_minimal()
+
+emiss<-ggplot(data=clim_point_allair)+
+  geom_line(aes(x=obs_time,y=emissivity))+
+  labs(x="Date",y="Solar Emissivity")+
+  theme_minimal()
+
+irrad<-ggplot(data=clim_point_allair)+
+  geom_line(aes(x=obs_time,y=rad_dni))+
+  labs(x="Date",y="Direct Normal Irradiance")+
+  theme_minimal()
+
+alvaro<-annotate(geom="rect",xmin = as.POSIXct("2023-12-31"), xmax = as.POSIXct("2024-01-02"), ymin = -Inf, ymax = Inf,alpha=0.5,fill="red")
+filipo<-annotate(geom="rect",xmin = as.POSIXct("2024-03-06"), xmax = as.POSIXct("2024-03-10"), ymin = -Inf, ymax = Inf,alpha=0.5,fill="red")
+
+ggarrange(airtempsplot+
+            theme_minimal()+
+            theme(legend.position="none")+
+            alvaro+
+            filipo+
+            annotate("text",x=as.POSIXct("2023-10-31"),y=40,label="Cyclone Alvaro")+
+            annotate("text",x=as.POSIXct("2024-04-30"),y=40,label="Cyclone Filipo"),
+          wind +alvaro +filipo,
+          cloudc +alvaro+filipo,
+          irrad + alvaro+filipo,
+          nrow=4,
+          align="hv")
+
+
+```
+
+```{r,echo=F,warning=F}
+
+ggplot(data = combined_data) +
+  geom_violin(aes(x = id, y = temp, fill = id), alpha = 0.4)+theme_minimal() +
+  labs(x = "Date", y = "Temp (⁰C)", fill = "Dataset")
+
+air_mod<-lm(temp ~ id, data=combined_data)
+summary(air_mod)
+
+```
+
+# Water Temperatures
+
+```{r,echo=F,warning=F,eval=F,results='hide'}
+
+#OISST data
+rerddap::cache_delete_all()
+sst_dataset <- "ncdcOisst21Agg_LonPM180"
+sst_info <- rerddap::info(sst_dataset, url = 'https://coastwatch.pfeg.noaa.gov/erddap/')
+
+ oisst_data<- OISST_dat <- rerddap::griddap(datasetx = sst_dataset,
+                                url = "https://coastwatch.pfeg.noaa.gov/erddap/", 
+                                time = c(as.character(as.Date(min(salary_temps$datetime))),                  as.character(as.Date(max(salary_temps$datetime)))), 
+                                zlev = c(0, 0),
+                                latitude = c(-22, -23),
+                                longitude = c(43, 44),
+                                fields = "sst")$data |> 
+    dplyr::mutate(time = base::as.Date(stringr::str_remove(time, "T12:00:00Z"))) |> 
+    dplyr::rename(t = time, temp = sst, lon = longitude, lat = latitude) |> 
+    dplyr::select(lon, lat, t, temp) |> 
+    stats::na.omit()
+
+#oisst_data%>%
+#  filter(lon==43.375)%>%
+#  filter(lat==-22.625)%>%
+#  ggplot()+
+#  geom_line(aes(x=t,y=temp))
+sat_sst<-oisst_data%>%
+  filter(lon==43.375)%>%
+  filter(lat==-22.625)%>%
+  dplyr::select(c(t,temp))%>%
+  rename("date"="t")%>%
+  mutate("id"="OISST")
+
+#####################################################################
+write.csv(sat_sst,"sat_sst.csv")
+```
+
+```{r}
+#| warning: false
+#| echo: false
+
+#copernicus sst data GLOBAL_ANALYSISFORECAST_PHY_001_024 from 0.49m depth
+cop_mada<-terra::rast("cop_sst.nc")
+cop_mada_ext<-terra::extract(cop_mada,y=cbind(43.25,-22.6),method="simple")
+datetime<-terra::time(cop_mada)
+
+
+reshaped_data <- cop_mada_ext %>%
+  pivot_longer(cols = starts_with("thetao_depth"),  
+               names_to = "depth",                 
+               values_to = "temp")%>%
+  mutate(depth=0.49402499)
+
+# If 'lon', 'lat', and 'datetime' are available, you can add them here
+reshaped_data <- reshaped_data %>%
+  mutate(lon = 43.25,   # Add your longitude value or vector
+         lat = -22.6,   # Add your latitude value or vector
+         date = datetime)  # Add your datetime value or vector
+
+cop_mada_data<-reshaped_data%>%
+  dplyr::select(c(date,temp))%>%
+  mutate("id"="Copernicus")
+```
+
+
+```{r,echo=F,warning=F,results='hide'}
+#  OISST
+sat_sst <- read.csv("sat_sst.csv") %>%
+  dplyr::select(-X) %>%
+  mutate(date = as.Date(date)) %>%
+  rename(OISST = temp) %>%
+  dplyr::select(date, OISST)
+
+# Copernicus
+cop_mada_data2 <- cop_mada_data %>%
+  mutate(date = as.Date(date)) %>%
+  rename(Copernicus = temp) %>%
+  dplyr::select(date, Copernicus)
+
+
+water_temps_daily_alldays<-salary_temps %>%
+  filter(site %in% c("saleb1_bommie", "saleb3_rubble", "saleb5_lagoon")) %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(date, id) %>%
+  summarize(temp = mean(temp, na.rm = TRUE), .groups = "drop")
+ 
+logger_wide <-water_temps_daily_alldays%>%
+  pivot_wider(names_from = id, values_from = temp)
+
+water_temps_alldays<-salary_temps %>%
+  dplyr::filter(site %in% c("saleb1_bommie", "saleb3_rubble", "saleb5_lagoon")) %>%
+  mutate(date = floor_date(datetime, unit = "days"))
+
+
+  ggplot(data=water_temps_alldays)+
+  geom_line(aes(x=datetime,y=temp,group=id,color=id),alpha=0.8,size=1)+
+  theme_linedraw()+
+    labs(x = "Date", y = "Temp (⁰C)", color = "Dataset",title="Hourly Temperatures")+
+  scale_color_manual(values=c("mediumorchid", "steelblue","forestgreen"),labels=c("SALEB1 Shallow Lagoon","SALEB3 Backreef","SALEB5 Deep Lagoon"))
+
+saleb8_flat_deploy<-as.Date(site_data[site_data$id=="SALEB8",8])
+saleb8_flat_recovery<-as.Date(site_data[site_data$id=="SALEB8",9])
+
+water_temps<-water_temps_alldays%>%
+  dplyr::filter(datetime<saleb8_flat_recovery )%>%
+     dplyr::filter(datetime>saleb8_flat_deploy)
+
+water_temps_daily<-water_temps_daily_alldays%>%
+    dplyr::filter(date<saleb8_flat_recovery )%>%
+     dplyr::filter(date>saleb8_flat_deploy)
+
+temp_wide <- logger_wide %>%
+  full_join(sat_sst, by = "date") %>%
+  full_join(cop_mada_data2, by = "date") %>%
+  arrange(date)
+
+# Calculate Pearson correlation matrix
+cor_matrix <- temp_wide %>%
+  dplyr::select(-c(date)) %>%  # remove date column
+  cor(use = "pairwise.complete.obs", method = "pearson")
+
+
+#clean up satellite data to merge together
+sat_sst_clean <- sat_sst %>%
+  mutate(
+    id = "OISST",        
+    temp = OISST         
+  ) %>%
+  dplyr::select(date, id, temp)
+
+cop_clean <-cop_mada_data2%>%
+    mutate(
+    id = "Copernicus",        
+    temp = Copernicus         
+  ) %>%
+  dplyr::select(date, id, temp)
+
+temp_long<- bind_rows(water_temps_daily_alldays, sat_sst_clean,cop_clean)
+ 
+
+
+
+
+```
+
+```{r,echo=F,warning=F}
+
+temp_daily_wide<-salary_temps %>%
+  filter(!id %in% c("SALEB10")) %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(date, id) %>%
+  summarize(temp = mean(temp, na.rm = TRUE), .groups = "drop")%>%
+  pivot_wider(names_from = id, values_from = temp)
+
+water_sat_temps_wide_cor <- temp_daily_wide %>%
+  left_join(sat_sst, by = "date") %>%
+  left_join(cop_mada_data2, by = "date") %>%
+  arrange(date)
+
+ref_vars <- c("OISST", "Copernicus")
+target_vars <- c("SALEB1", "SALEB3", "SALEB5","SALEB8")
+plot_list <- list()
+
+for (ref in ref_vars) {
+  for (target in target_vars) {
+    
+    dat <- water_sat_temps_wide_cor %>%
+      dplyr::select(date, !!target, !!ref) %>%
+      rename(SST = !!target, REF = !!ref) %>%
+      na.omit()
+
+    dat$residuals <- abs(dat$SST - dat$REF)
+
+    lm_model <- lm(SST ~ REF, data = dat)
+    r2_val <- summary(lm_model)$r.squared
+
+    p <- ggplot(data = dat, aes(x = REF, y = SST, color = residuals)) +
+      geom_point(alpha = 0.3) +
+      theme_linedraw() +
+      labs(
+        x = paste0(ref, " (°C)"), 
+        y = paste0(target, " (°C)"), 
+        color = "Residuals"
+      ) +
+      scale_color_viridis_c(option = "inferno",transform="pseudo_log",limits=c(0.01,25),breaks=c(0,1,2,3,4,5,10,20)) +
+      geom_abline(color = "red", intercept = 0, slope = 1) +
+      annotate(
+        geom = "label",
+        x = min(dat$REF, na.rm = TRUE) + 1,
+        y = max(dat$SST, na.rm = TRUE) - 1,
+        label = as.character(as.expression(bquote(R^2 == .(round(r2_val, 2))))),
+        parse = TRUE
+      ) +
+      geom_textabline(intercept = 0, slope = 1, label = "1:1 Line",color="red",vjust=1,hjust=.1) +
+     geom_textabline(intercept = lm_model$coefficients[1], slope = lm_model$coefficients[2], label = "Linear Regression",color="blue",vjust=1,hjust=.85)
+
+    plot_list[[paste0(target, "_vs_", ref)]] <- p
+  }
+}
+
+copernicus_plots <- plot_list[grep("_vs_Copernicus$", names(plot_list))]
+oisst_plots <- plot_list[grep("_vs_OISST$", names(plot_list))]
+
+
+arranged_plots_daily <- mapply(
+  function(cop, ois) list(cop, ois),
+  copernicus_plots, oisst_plots,
+  SIMPLIFY = FALSE
+) |> unlist(recursive = FALSE)
+
+ggarrange(plotlist = arranged_plots_daily, ncol = 2, nrow = 4,common.legend = T)
+ggsave("figures/sat_logger_daily_correlations_supp.png",height=9,width=6)
+
+```
+
+Get correlations, but across all observations of the loggers on an hourly basis.
+
+```{r,echo=F,warning=F}
+
+
+
+water_temps_alldays_wide <- salary_temps %>%
+  dplyr::select(datetime,id,temp)%>%
+  mutate(datetime_rounded = floor_date(datetime, unit = "15 minutes")) %>%
+  group_by(datetime_rounded, id) %>%
+  dplyr::select(-datetime)%>%
+  mutate(date=as.Date(datetime_rounded)) %>%
+  pivot_wider(names_from = id, values_from = temp)
+
+
+water_sat_temps_wide <- water_temps_alldays_wide %>%
+  left_join(sat_sst, by = "date") %>%
+  left_join(cop_mada_data2, by = "date") %>%
+  arrange(date)
+
+
+ref_vars <- c("OISST", "Copernicus")
+target_vars <- c("SALEB1", "SALEB3", "SALEB5","SALEB8")
+plot_list <- list()
+
+for (ref in ref_vars) {
+  for (target in target_vars) {
+    
+    dat <- water_sat_temps_wide %>%
+      dplyr::select(date, !!target, !!ref) %>%
+      rename(SST = !!target, REF = !!ref) %>%
+      na.omit()
+
+    dat$residuals <- abs(dat$SST - dat$REF)
+
+    lm_model <- lm(SST ~ REF, data = dat)
+    r2_val <- summary(lm_model)$r.squared
+
+    p <- ggplot(data = dat, aes(x = REF, y = SST, color = residuals)) +
+      geom_point(alpha = 0.1) +
+      theme_linedraw() +
+      labs(
+        x = paste0(ref, " (°C)"), 
+        y = paste0(target, " (°C)"), 
+        color = "Residuals (°C)"
+      ) +
+      scale_color_viridis_c(option = "inferno",transform="pseudo_log",limits=c(0.01,25),breaks=c(0,1,2,3,4,5,10,20)) +
+      geom_abline(color = "red", intercept = 0, slope = 1) +
+      geom_smooth(method = "lm", color = "blue", se = FALSE) +
+      annotate(
+        geom = "label",
+        x = min(dat$REF, na.rm = TRUE) + 1,
+        y = max(dat$SST, na.rm = TRUE) - 1,
+        label = as.character(as.expression(bquote(R^2 == .(round(r2_val, 2))))),
+        parse = TRUE
+      ) +
+      geom_textabline(intercept = 0, slope = 1, label = "1:1 Line",color="red",vjust=1,hjust=.1) +
+     geom_textabline(intercept = lm_model$coefficients[1], slope = lm_model$coefficients[2], label = "Linear Regression",color="blue",vjust=1,hjust=.85)
+
+    plot_list[[paste0(target, "_vs_", ref)]] <- p
+  }
+}
+
+copernicus_plots <- plot_list[grep("_vs_Copernicus$", names(plot_list))]
+oisst_plots <- plot_list[grep("_vs_OISST$", names(plot_list))]
+
+
+arranged_plots <- mapply(
+  function(cop, ois) list(cop, ois),
+  copernicus_plots, oisst_plots,
+  SIMPLIFY = FALSE
+) |> unlist(recursive = FALSE)
+
+ggarrange(plotlist = arranged_plots, ncol = 2, nrow = 4,common.legend = T)
+ggsave("figures/sat_logger_hourly_correlations_supp.png",height=9,width=6)
+
+```
+
+
+For summary stats we just used the time period we have all three datasets. So that we can compare it to the intertidal data later from SALEB8, of which we have the least data, we will use the recovery date for SALEB8 as a end date for analysis.
+
+First, we examine by summarizing the logger data collected every 15 minutes to the daily scale, the scale at which we have sst data.
+
+```{r,echo=F,warning=F}
+
+#sort id by copernicus, oisst, SALEB1, SALEB3, and SALEB5
+
+boxplot<-ggplot(data=temp_long)+
+  theme_linedraw() +
+    geom_violin(aes(x=id,y=temp,fill=id),alpha=0.4)+
+    geom_boxplot(aes(x=id,y=temp,fill=id),alpha=0.2,width = .1, size = 1.2, outlier.shape = NA,notch=F,color="black")+
+  labs(x = "Date", y = "Temp (⁰C)", fill = "Dataset",color="Dataset")+
+    scale_fill_manual(values=c("darkgray","black","mediumorchid","steelblue","forestgreen"),labels=c("Copernicus SST","OISST","SALEB1 Shallow Lagoon","SALEB3 Backreef","SALEB5 Deep Lagoon"))+
+        scale_color_manual(values=c("darkgray","black","mediumorchid","steelblue","forestgreen"),labels=c("Copernicus SST","OISST","SALEB1 Shallow Lagoon","SALEB3 Backreef","SALEB5 Deep Lagoon"))
+  
+  lineplot<-ggplot() +
+  geom_line(data=temp_long,aes(x = date, y = temp, color = id), alpha = 0.8,size=1) +
+  theme_linedraw() +
+  labs(x = "Date", y = "Temp (⁰C)", color = "Dataset",title="Daily Temperatures")+
+  scale_color_manual(values=c("darkgray","black","mediumorchid", "steelblue","forestgreen"),labels=c("Copernicus SST","OISST","SALEB1 Shallow Lagoon","SALEB3 Backreef","SALEB5 Deep Lagoon")) +
+    geom_vline(xintercept=c(min(water_temps_daily$date),max(water_temps_daily$date)),linetype="dotted")
+
+svg("figures/water_temps_daily.svg",width=6,height=8)
+  
+ggarrange(boxplot,lineplot,nrow=2,labels=c("A","B"),common.legend=T,legend="right")
+
+dev.off()
+
+water_temps_table<-water_temps%>%
+     mutate("datetime_hour"=round(datetime, units="hours"))%>%
+  group_by(id)%>%
+summarise(mean = mean(temp, na.rm = TRUE), 
+          sd = sd(temp, na.rm = TRUE), 
+          var = var(temp, na.rm = TRUE), 
+          min = min(temp, na.rm = TRUE), 
+          max = max(temp, na.rm = TRUE),
+          hours_above_30C = sum(temp >= 30, na.rm = TRUE)/4)
+kable(water_temps_table)
+
+all_data_for_violin<-salary_temps %>%
+  dplyr::filter(site %in% c("saleb1_bommie", "saleb3_rubble", "saleb5_lagoon","saleb8_flat"))%>%
+    dplyr::filter(datetime<saleb8_flat_recovery )%>%
+     dplyr::filter(datetime>saleb8_flat_deploy)%>%
+  na.omit()
+
+all_data_for_lineplot<-salary_temps %>%
+  dplyr::filter(site %in% c("saleb1_bommie", "saleb3_rubble", "saleb5_lagoon","saleb8_flat"))
+
+#levels for x axis boxplot
+all_data_for_violin$id <- factor(
+  all_data_for_violin$id,
+  levels = c("SALEB1", "SALEB3", "SALEB5", "SALEB8"),
+  labels = c("SALEB1 Shallow Lagoon", "SALEB3 Backreef", "SALEB5 Deep Lagoon", "SALEB8 Reef Flat")
+)
+
+
+
+violin_plot<-ggplot(all_data_for_violin, aes(x = id, y = temp, fill = id, color = id)) +
+  geom_violin(alpha = 0.4) +  # Removed draw_quantiles for now
+  theme_minimal() +
+  labs(x = "", y = "Temp (⁰C)", fill = "Dataset", color = "Dataset") +
+  scale_fill_manual(
+    values = c("mediumorchid", "steelblue", "forestgreen", "darkorange"),
+    labels = c("SALEB1 Shallow Lagoon", "SALEB3 Backreef", "SALEB5 Deep Lagoon", "SALEB8 Reef Flat")
+  ) +
+  scale_color_manual(
+    values = c("mediumorchid", "steelblue", "forestgreen", "darkorange"),
+    labels = c("SALEB1 Shallow Lagoon", "SALEB3 Backreef", "SALEB5 Deep Lagoon", "SALEB8 Reef Flat")
+  ) +
+  geom_signif(
+    comparisons = list(
+      c("SALEB1 Shallow Lagoon", "SALEB3 Backreef"),
+      c("SALEB1 Shallow Lagoon", "SALEB5 Deep Lagoon"),
+      c("SALEB1 Shallow Lagoon", "SALEB8 Reef Flat"),
+      c("SALEB3 Backreef", "SALEB5 Deep Lagoon"),
+      c("SALEB3 Backreef", "SALEB8 Reef Flat"),
+      c("SALEB5 Deep Lagoon", "SALEB8 Reef Flat")
+    ),
+    map_signif_level = TRUE,
+    textsize = 4,
+    vjust = 0.5,
+    size = 0.5,
+    color = "black",
+    y_position = c(34, 35, 36, 37, 38, 39) # Control vertical placement
+  )
+
+#get mean for only these four loggers
+water_temps_table<-water_temps%>%
+  filter(id %in% c("SALEB1", "SALEB3", "SALEB5", "SALEB8"))%>%
+  mutate(id = factor(id, levels = c("SALEB1 Shallow Lagoon", "SALEB3 Backreef", "SALEB5 Deep Lagoon", "SALEB8 Reef Flat")))
+
+violin_plot_leg<-get_legend(violin_plot)
+violin_plot_noleg<-violin_plot+
+  #geom_point(data=water_temps_table,aes(x=id,y=mean))+
+  geom_boxplot(data=all_data_for_violin,aes(x=id,y=temp,fill=id),width = .1, size = 1.2, outlier.shape = NA,notch=T)+
+  theme_linedraw()+theme(legend.position="none",axis.text.x = element_blank())
+
+  
+temp_plot<-ggplot(data=all_data_for_lineplot)+
+  geom_line(aes(x=datetime,y=temp,group=id,color=id))+
+  theme_linedraw()+
+    labs(x = "Date", y = "Temp (⁰C)", color = "Dataset")+
+  scale_color_manual(values=c("mediumorchid", "steelblue","forestgreen","darkorange"),labels=c("SALEB1 Backreef","SALEB3 Lagoon","SALEB5 Lagoon","SALEB8 Reef FLat"))+
+    geom_vline(xintercept=as.POSIXct(saleb8_flat_deploy),linetype="dashed")+
+    geom_vline(xintercept=as.POSIXct(saleb8_flat_recovery),linetype="dashed")
+
+#temp_plot_leg<-get_legend(temp_plot)
+temp_plot_noleg<-ggplot(data=all_data_for_lineplot)+
+  geom_line(aes(x=datetime,y=temp,group=id,color=id))+
+  theme_linedraw()+
+    labs(x = "Date", y = "Temp (⁰C)", color = "Dataset")+
+  scale_color_manual(values=c("mediumorchid", "steelblue","forestgreen","darkorange"),labels=c("SALEB1 Backreef","SALEB3 Lagoon","SALEB5 Lagoon","SALEB8 Reef Flat"))+
+    geom_vline(xintercept=as.POSIXct(saleb8_flat_deploy),linetype="dashed")+
+    geom_vline(xintercept=as.POSIXct(saleb8_flat_recovery),linetype="dashed")+theme(legend.position="none",strip.background = element_blank())+
+  #gghighlight(use_direct_label = FALSE,unhighlighted_params = list(colour = NULL, alpha = c(0.3)))+
+  facet_wrap(.~id)
+
+svg(file="figures/sitetempswater.svg",height=6,width=12)
+plot_grid(temp_plot_noleg,violin_plot_noleg,violin_plot_leg,nrow=1,rel_widths = c(1,0.5,0.3),labels=c("A","B",""))
+dev.off()
+
+```
+
+
+
+
+
+Interestingly, the number of hours above 30C at the saleb1_bommie site is `r round((1477.50-1089.00)/((1477.50+1089.00)/2)*100,2)`% more than the number of hours at the saleb5_lagoon site. Overall, though, mostly pretty similar.
+
+Let's see if the sites are signficantly different, first looking daily with sst
+
+```{r,echo=F,warning=F}
+temp_long$id<-as.factor(temp_long$id)
+
+
+#not signficant
+kruskal.test(temp ~ id,data=temp_long)
+
+dunn_test(temp_long, temp ~ id,p.adjust.method="bonferroni")
+
+
+daily_data_table<-temp_long%>%
+  group_by(id)%>%
+  summarise(mean=round(mean(temp),2),
+            sd=round(sd(temp),2),
+            min=round(min(temp),2),
+            max=round(max(temp),2),
+            days_above_30C=round(sum(temp>=30)/4,2))
+daily_data_table
+write.csv(daily_data_table,"daily_data_table.csv")
+```
+
+Now, let's look at quarter-hour data. We see that site differences really come out when we look at subdaily data. 
+
+
+```{r,echo=F,warning=F}
+
+kruskal.test(temp ~ id,data=water_temps)
+dunn_test(temp ~ id,data=water_temps)
+
+```
+
+How does daily variability vary across sites? We examine only logger data since sst is alculated daily. Variance is only significantly diferent between 1 (bommie, backreef) and 5 (lagoon), with the lagoon having the most variance. However, the temperature vaiability or range is highest in the rubble site (3), which is signficantly more than the backreef and weakly with the lagoon (5)
+
+```{r,echo=F,warning=F}
+daily_vars_waterlogs<-water_temps%>%
+  mutate(date=as.Date(datetime))%>%
+  group_by(id, date)%>%
+  summarise(var=var(temp),
+            range=max(temp)-min(temp))
+
+daily_vars_waterlogs$id<-as.factor(daily_vars_waterlogs$id)
+
+ggplot(data=daily_vars_waterlogs,aes(x=id,y=var,group=id,fill=id,color=id))+
+  geom_jitter()+
+  geom_boxplot(alpha=0.8,color="black",outliers=F)+theme_linedraw()+labs(fill="Logger",color="Logger",x="",y="Temperature Variance (⁰C)")
+
+ggplot(data=daily_vars_waterlogs,aes(x=date,y=var,group=id,color=id))+
+geom_line()+theme_linedraw()+labs(fill="Logger",color="Logger",x="Date",y="Temperature Variance (⁰C)")
+
+
+kruskal.test(var~id,data=daily_vars_waterlogs)
+
+
+ggplot(data=daily_vars_waterlogs,aes(x=id,y=range,group=id,fill=id,color=id))+
+  geom_jitter()+
+  geom_boxplot(alpha=0.8,outliers=F,color="black")+theme_linedraw()+labs(fill="Logger",color="Logger",x="",y="Temperature Variability (⁰C)")
+
+ggplot(data=daily_vars_waterlogs,aes(x=date,y=range,group=id,color=id))+
+geom_line()+theme_linedraw()+labs(fill="Logger",color="Logger",x="Date",y="Temperature Range (⁰C)")
+
+
+kruskal.test(range~id,data=daily_vars_waterlogs)
+daily_vars_waterlogs %>%
+  ungroup() %>%
+  dunn_test(range ~ id)
+```
+
+Of course, once we include intertidal temperatures, it blows these comparisons out of the water.
+
+```{r,echo=F,warning=F}
+
+daily_vars_waterlogs_fring<-salary_temps %>%
+  dplyr::filter(site %in% c("saleb1_bommie", "saleb3_rubble", "saleb5_lagoon","saleb8_flat","saleb10_chezFred"))%>%
+    dplyr::filter(datetime<saleb8_flat_recovery )%>%
+     dplyr::filter(datetime>saleb8_flat_deploy)%>%
+  mutate(date=as.Date(datetime))%>%
+  group_by(id, date)%>%
+  summarise(var=var(temp),
+            range=max(temp)-min(temp))
+
+daily_vars_waterlogs_fring$id<-as.factor(daily_vars_waterlogs_fring$id)
+
+ggplot(data=daily_vars_waterlogs_fring,aes(x=id,y=var,group=id,fill=id,color=id))+
+  geom_jitter()+
+  geom_boxplot(alpha=0.8,color="black",outliers=F)+theme_linedraw()+labs(fill="Logger",color="Logger",x="",y="Temperature Variance (⁰C)")
+
+ggplot(data=daily_vars_waterlogs_fring,aes(x=date,y=var,group=id,color=id))+
+geom_line()+theme_linedraw()+labs(fill="Logger",color="Logger",x="Date",y="Temperature Variance (⁰C)")
+
+
+daily_vars_waterlogs_fring%>%
+  ungroup()%>%
+kruskal_test(var~id)
+
+daily_vars_waterlogs_fring%>%
+  ungroup()%>%
+  dunn_test(var~id)
+
+ggplot(data=daily_vars_waterlogs_fring,aes(x=id,y=range,group=id,fill=id,color=id))+
+  geom_jitter()+
+  geom_boxplot(alpha=0.8,outliers=F,color="black")+theme_linedraw()+labs(fill="Logger",color="Logger",x="",y="Temperature Variability (⁰C)")
+
+ggplot(data=daily_vars_waterlogs_fring,aes(x=date,y=range,group=id,color=id))+
+geom_line()+theme_linedraw()+labs(fill="Logger",color="Logger",x="Date",y="Temperature Range (⁰C)")
+
+daily_vars_waterlogs_fring%>%
+  ungroup()%>%
+kruskal_test(range~id)
+
+daily_vars_waterlogs_fring%>%
+  ungroup()%>%
+  dunn_test(range~id)
+
+
+#total mean of amplitude (range)
+daily_range<-daily_vars_waterlogs_fring%>%
+  group_by(id)%>%
+  summarise(mean_range=mean(range),
+            sd_range=sd(range))
+
+```
+
+And here are the summary stats for all sites:
+
+
+```{r}
+kable(salary_temps %>%
+  dplyr::filter(site %in% c("saleb1_bommie", "saleb3_rubble", "saleb5_lagoon","saleb8_flat","saleb10_chezFred"))%>%
+    dplyr::filter(datetime<saleb8_flat_recovery )%>%
+     dplyr::filter(datetime>saleb8_flat_deploy)%>%
+  group_by(id)%>%
+summarise(mean = round(mean(temp, na.rm = TRUE),2), 
+          sd = round(sd(temp, na.rm = TRUE),2), 
+          var = round(var(temp, na.rm = TRUE),2), 
+          min = round(min(temp, na.rm = TRUE),2), 
+          max = round(max(temp, na.rm = TRUE),2),
+          hours_above_30C = round((sum(temp >= 30, na.rm = TRUE)/4)))%>%
+  left_join(daily_range,by="id")%>%
+  mutate(mean_range = round(mean_range,2),
+sd_range = round(sd_range,2)))
+```
+
+
+
+# Intertidal Temperatures
+
+Intertidal temperature can be modulated by two factors: the tide, and nighttime/daytime.
+
+```{r,echo=F,warning=F}
+
+#add information about sunrise/sunset
+ephemeris_hms <- function(lat, lon, date, span=1, tz="") {
+  
+  # convert to the format we need
+  lon.lat <- matrix(c(lon, lat), nrow=1)
+  
+  # make our sequence - using noon gets us around daylight saving time issues
+  day <- as.POSIXct(date, tz=tz)
+  sequence <- seq.POSIXt(from=day, length.out=span , by="days")
+  #min_sequence<-all$time
+  
+  # get our data
+  sunrise <- sunriset(lon.lat, sequence, direction="sunrise", POSIXct.out=TRUE)
+  sunset <- sunriset(lon.lat, sequence, direction="sunset", POSIXct.out=TRUE)
+  solar_noon <- solarnoon(lon.lat, sequence, POSIXct.out=TRUE)
+  
+  
+  # build a data frame from the vectors
+  data.frame(date=as.POSIXct(sunrise$time,tz=tz),
+             sunrise=sunrise,
+             #sunrise=(as.numeric(strftime(sunrise$time, "%H",tz=tz)) * 60 + as.numeric(strftime(sunrise$time, "%M")))/60,
+             solarnoon=solar_noon,
+             #sunset=as.numeric(format(sunset$time, "%H%M")),
+             sunset=sunset,
+             day_length=as.numeric(sunset$time-sunrise$time))
+  
+}
+
+salary_temps$date<-as.Date(salary_temps$datetime)
+
+mada_ephem<-ephemeris_hms(lat=-22.6,lon=43.25,date="2023-07-27 00:00:00",span=length(unique(salary_temps$date)),tz="Africa/Addis_Ababa")
+
+# Add date column to `salary_temps`
+salary_temps <- salary_temps %>%
+  mutate(date = as.Date(datetime,tz="Africa/Addis_Ababa"),
+         day_night = NA)
+
+mada_ephem <- mada_ephem %>%
+  mutate(
+    sunrise.time = floor_date(sunrise.time, "minute"),
+    sunset.time = floor_date(sunset.time, "minute"),
+    true_date = as.Date(date)
+  )
+
+salary_date_seq<-seq.Date(min(salary_temps$date),max(salary_temps$date),by="day")
+
+
+for (i in seq_along(salary_date_seq)) {
+  # Get sunrise and sunset times for the current date
+  sunrise.time_i <- mada_ephem[mada_ephem$true_date == salary_date_seq[i], "sunrise.time"]
+  sunset.time_i <- mada_ephem[mada_ephem$true_date == salary_date_seq[i], "sunset.time"]
+  
+  # Identify rows for the current date in `salary_temps` as a logical vector
+  temp_day_i <- salary_temps$date == salary_date_seq[i]
+  
+  
+  # Apply the day/night assignment for each row for the current date
+  salary_temps$day_night[temp_day_i] <- ifelse(
+    salary_temps$datetime[temp_day_i] > sunrise.time_i & salary_temps$datetime[temp_day_i] < sunset.time_i,
+    "day", "night"
+  )
+}
+
+salary_temps <- salary_temps %>%
+  mutate(night_color = ifelse(day_night == "night", "black", "orange"))
+
+ggplot()+
+ # geom_rect(
+ #   data = mada_ephem,
+ #   aes(xmin = sunrise.time - hours(24), xmax = sunrise.time + hours(24)),
+ #   ymin = -Inf, ymax = Inf, fill = 'darkblue',alpha=0.2, inherit.aes = FALSE
+ # ) +
+ # # Then, overlay with white rectangles for daytime
+ # geom_rect(
+ #   data = mada_ephem,
+ #   aes(xmin = sunrise.time, xmax = sunset.time),
+ #   ymin = -Inf, ymax = Inf, fill = 'white', alpha = 1, inherit.aes = FALSE
+ # )+
+  geom_line(data=salary_temps,aes(x=datetime,y=temp,group=site,color=day_night))+theme_linedraw()+
+  facet_wrap(.~site)+
+  labs(x="Date",y="Temp (⁰C)",color="Day/Night")+scale_color_manual(values=c("night"="black","day"="orange"))
+
+ggplot()+
+  geom_boxplot(data=salary_temps,aes(x=site,y=temp,group=interaction(day_night,site),fill=day_night))+theme_linedraw()+
+  labs(x="Date",y="Temp (⁰C)",fill="Day/Night")+scale_fill_manual(values=c("night"="black","day"="orange"))
+
+```
+
+
+Let's just look at the single intertidal site
+
+```{r,echo=F}
+
+ggplot()+
+ # geom_rect(
+ #   data = mada_ephem,
+ #   aes(xmin = sunrise.time - hours(24), xmax = sunrise.time + hours(24)),
+ #   ymin = -Inf, ymax = Inf, fill = 'darkblue',alpha=0.2, inherit.aes = FALSE
+ # ) +
+ # # Then, overlay with white rectangles for daytime
+ # geom_rect(
+ #   data = mada_ephem,
+ #   aes(xmin = sunrise.time, xmax = sunset.time),
+ #   ymin = -Inf, ymax = Inf, fill = 'white', alpha = 1, inherit.aes = FALSE
+ # )+
+  geom_line(data=salary_temps%>%filter(site=="saleb8_flat"),aes(x=datetime,y=temp,group=site,color=day_night))+theme_linedraw()+
+  labs(x="Date",y="Temp (⁰C)",color="Day/Night")+scale_color_manual(values=c("night"="black","day"="orange"))
+
+```
+
+```{r,echo=F,warning=F}
+max_temps_inter<-salary_temps%>%filter(site=="saleb8_flat")%>%mutate(month=month(datetime))%>%
+  mutate(year=year(datetime))%>%group_by(day_night,month,year)%>%summarise(quantile=quantile(temp,0.95),maxtemp=max(temp))
+max_temps_inter$year<-as.factor(max_temps_inter$year)
+max_temps_inter$month<-ordered(max_temps_inter$month, labels = month.abb)
+
+
+
+ggplot(data=max_temps_inter,aes(x=month,y=maxtemp,group=interaction(year,day_night),color=day_night,linetype=year))+geom_line()+geom_point()+theme_linedraw()+labs(x="Month",y="Maximum Temperature (⁰C", color="Day/Night Exposure",linetype="Year")
+
+ggplot(data=max_temps_inter,aes(x=month,y=quantile,group=interaction(year,day_night),color=day_night,linetype=year))+geom_line()+geom_point()+theme_linedraw()+labs(x="Month",y="95% Temperature (⁰C)", color="Day/Night Exposure",linetype="Year")
+
+```
+
+Before we go any farther, do certain sites have different temperatures at day versus the night?
+
+```{r,echo=F,warning=F}
+saleb8_flat_deploy<-as.Date(site_data[site_data$id=="SALEB8",8])
+saleb8_flat_recovery<-as.Date(site_data[site_data$id=="SALEB8",9])
+
+salary_temps_dn<-salary_temps%>%
+  dplyr::filter(datetime<saleb8_flat_recovery )%>%
+     dplyr::filter(datetime>saleb8_flat_deploy)%>%
+  mutate(daynight_group =paste0(day_night,id))
+
+kruskal.test(temp ~ daynight_group,data=salary_temps_dn)
+dunn_test(temp ~ daynight_group,data=salary_temps_dn)
+
+
+
+```
+
+
+
+And let's zoom in on a single month to get a better idea of what is going on
+
+```{r,echo=F}
+start_date<-min(salary_temps$date)
+end_date<-"2023-09-15"
+
+ggplot()+
+  geom_rect(
+    data = mada_ephem%>%
+      filter(format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time - hours(24), xmax = sunrise.time + hours(24)),
+    ymin = -Inf, ymax = Inf, fill = 'darkblue',alpha=0.2, inherit.aes = FALSE
+  ) +
+  # Then, overlay with white rectangles for daytime
+  geom_rect(
+    data = mada_ephem%>%
+      filter(format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time, xmax = sunset.time),
+    ymin = -Inf, ymax = Inf, fill = 'white', alpha = 1, inherit.aes = FALSE
+  )+
+  geom_line(data=salary_temps%>%
+              filter(site=="saleb8_flat")%>%
+              filter(format(datetime, "%Y-%m-%d") < end_date  & format(datetime, "%Y-%m-%d") > start_date)
+            ,aes(x=datetime,y=temp,group=site,color=day_night),lwd=0.75)+theme_linedraw()+
+  labs(x="Date",y="Temp (⁰C)",color="Day/Night")+scale_color_manual(values=c("night"="black","day"="orange"))
+
+
+```
+
+And closer again
+
+```{r,echo=F}
+start_date<-"2023-08-10"
+end_date<-"2023-08-24"
+
+ggplot()+
+  geom_rect(
+    data = mada_ephem%>%
+      filter(format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time - hours(24), xmax = sunrise.time + hours(24)),
+    ymin = -Inf, ymax = Inf, fill = 'darkblue',alpha=0.2, inherit.aes = FALSE
+  ) +
+  # Then, overlay with white rectangles for daytime
+  geom_rect(
+    data = mada_ephem%>%
+      filter(format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time, xmax = sunset.time),
+    ymin = -Inf, ymax = Inf, fill = 'white', alpha = 1, inherit.aes = FALSE
+  )+
+  geom_line(data=salary_temps%>%
+              filter(site=="saleb8_flat")%>%
+              filter(format(datetime, "%Y-%m-%d") < end_date  & format(datetime, "%Y-%m-%d") > start_date)
+            ,aes(x=datetime,y=temp,group=site,color=day_night),lwd=0.75)+theme_linedraw()+
+  labs(x="Date",y="Temp (⁰C)",color="Day/Night")+scale_color_manual(values=c("night"="black","day"="orange"))
+
+
+```
+
+We see two interesting trends: the first is that at semiperiodic intervals (likely with low tides), the temperature of the logger increases dramatically but only during the day. At night, the temperature actually spikes downward as the logger is exposed to cooler night air. We can see this by overlaying air (red) and water (blue) temperatures over this plot, and seeing where the intertidal time series matches up with these other data sources.
+
+```{r,echo=F}
+
+ggplot()+
+ 
+  geom_line(data=salary_temps%>%
+              filter(site=="saleb8_flat")%>%
+              filter(format(datetime, "%Y-%m-%d") < end_date  & format(datetime, "%Y-%m-%d") > start_date)
+            ,aes(x=datetime,y=temp,group=site,color=day_night))+
+  geom_line(data=salary_temps%>%
+              filter(site=="saleb10_chezFred")%>%
+              filter(format(datetime, "%Y-%m-%d") < end_date  & format(datetime, "%Y-%m-%d") > start_date)
+            ,aes(x=datetime,y=temp,group=site),color="red",alpha=0.3)+
+  geom_line(data=salary_temps%>%
+              filter(site=="saleb5_lagoon")%>%
+              filter(format(datetime, "%Y-%m-%d") < end_date  & format(datetime, "%Y-%m-%d") > start_date)
+            ,aes(x=datetime,y=temp,group=site),color="blue",alpha=0.3)+
+  theme_linedraw()+
+  labs(x="Date",y="Temp (⁰C)",color="Day/Night")+scale_color_manual(values=c("night"="black","day"="orange"))
+
+```
+
+## Tidal Influence
+
+We can finally take a look at the influence of tides in the area. I used tidal analysis software in python to derive predictions for our area of interest. It is worth noting that these models are not able to account for complex water movements close to shore, especially in lagoon areas where reefs form a barrier to water movement.
+
+```{r,echo=F,warning=F}
+
+#plotted predictions
+mada_tide23<-read.csv('tide/tide_prediction_-22.5512N_43.2810_2023.csv')
+mada_tide24<-read.csv('tide/tide_prediction_-22.5512N_43.2810_2024.csv')
+mada_tide<-bind_rows(mada_tide23,mada_tide24)
+mada_tide$Datetime<-seq.POSIXt(from=as.POSIXct("2023-01-01 00:00:00",tz="Africa/Addis_Ababa"),
+                               to=as.POSIXct("2024-12-31 23:59:00",tz="Africa/Addis_Ababa"),by="1 min")+lubridate::hours(3) # Toliara is +3 UTC
+
+#now do the same thing with tides
+mada_tide$date<-as.Date(mada_tide$Datetime)
+mada_tide<-na.omit(mada_tide)
+
+mada_tide$day_night<-NA
+
+# Loop through each unique date
+for (i in seq_along(salary_date_seq)) {
+  # Get sunrise and sunset times for the current date
+  sunrise.time_i <- mada_ephem[mada_ephem$true_date == salary_date_seq[i], "sunrise.time"]
+  sunset.time_i <- mada_ephem[mada_ephem$true_date == salary_date_seq[i], "sunset.time"]
+
+  # Identify rows for the current date in `mada_tide`
+  current_date_rows <- mada_tide$date == salary_date_seq[i]
+  
+  # Apply the day/night assignment for each row for the current date
+  mada_tide$day_night[current_date_rows] <- ifelse(
+    mada_tide$Datetime[current_date_rows] >= sunrise.time_i & 
+      mada_tide$Datetime[current_date_rows] < sunset.time_i,
+    "day", "night"
+  )
+}
+mada_tide <- mada_tide %>%
+  mutate(night_color = ifelse(day_night == "night", "black", "red"))
+
+
+```
+
+This is the total tidal series at our site. Note that during the hot season (Nov-Mar), the number of extreme tide events are pretty limited
+
+```{r,echo=F}
+
+ggplot()+
+    geom_line(data = mada_tide,aes(x=Datetime,y=Tidal.Height..cm.,group=NA))+
+    #scale_color_manual(values=c("night"="black","day"="orange"))+
+  theme_linedraw()
+
+min.ht<-mada_tide %>%
+  filter(Datetime>as.POSIXct("2023/08/01",format="%Y/%m/%d"))%>%
+    group_by(month = lubridate::floor_date(Datetime, "month")) %>%
+    summarize(min.ht = min(Tidal.Height..cm.))
+
+hour_below<-mada_tide %>% 
+    filter(Datetime>as.POSIXct("2023/08/01",format="%Y/%m/%d"))%>%
+    group_by(month = lubridate::floor_date(Datetime, "month")) %>%
+    summarize(hours =sum(Tidal.Height..cm. < -100, na.rm = TRUE)/60)
+
+fring_temp<-salary_temps%>%
+  filter(site=="saleb8_flat")%>%
+  filter(datetime>as.POSIXct("2023/08/01",format="%Y/%m/%d"))%>%
+  group_by(month = lubridate::floor_date(datetime, "month")) %>%
+  summarize(temp.max = max(temp))
+
+a<-ggplot(min.ht,aes(x=month,y=min.ht))+geom_point()+geom_line()+labs(x="Date (as months)",y="Minimum Tide Height (cm)")
+
+b<-ggplot(hour_below,aes(x=month,y=hours))+geom_point()+geom_line()+labs(x="Date (as months)",y="Number of Hours below -100cm")
+
+c<-ggplot(fring_temp,aes(x=month,y=temp.max))+geom_point()+geom_line()+labs(x="Date (as months)",y="Maximum Monthly Temp (⁰C)")
+
+ggarrange(a,b,c,ncol=1)
+
+```
+
+And let's zoom in on a month's portion next to our intertidal data set
+
+```{r,echo=F,warning=F}
+fring<-ggplot() +
+  # First, create a base layer for the entire day
+  geom_rect(
+    data = filter(mada_ephem, format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time - hours(24), xmax = sunrise.time + hours(24)),
+    ymin = -Inf, ymax = Inf, fill = 'darkblue',alpha=0.2, inherit.aes = FALSE
+  ) +
+  # Then, overlay with white rectangles for daytime
+  geom_rect(
+    data = filter(mada_ephem, format(true_date, "%Y-%m-%d") < end_date & format(true_date,"%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time, xmax = sunset.time),
+    ymin = -Inf, ymax = Inf, fill = 'white', alpha = 1, inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = filter(salary_temps, format(date, "%Y-%m-%d") < end_date & format(date, "%Y-%m-%d") > start_date& site == "saleb8_flat"),
+    aes(x = datetime, y = temp, group = site, color = day_night)
+  ) +
+  scale_color_manual(values=c("night"="black","day"="orange"))+
+  theme_linedraw()
+
+
+
+tide<-ggplot()+
+  geom_rect(
+    data = filter(mada_ephem, format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time - hours(24), xmax = sunrise.time + hours(24)),
+    ymin = -Inf, ymax = Inf, fill = 'darkblue',alpha=0.2, inherit.aes = FALSE
+  ) +
+  # Then, overlay with white rectangles for daytime
+  geom_rect(
+    data = filter(mada_ephem, format(true_date, "%Y-%m-%d") < end_date  & format(true_date, "%Y-%m-%d") > start_date),
+    aes(xmin = sunrise.time, xmax = sunset.time),
+    ymin = -Inf, ymax = Inf, fill = 'white', alpha = 1, inherit.aes = FALSE)+
+  geom_line(data = filter(mada_tide, format(date , "%Y-%m-%d") < end_date  & format(date , "%Y-%m-%d") > start_date),aes(x=Datetime,y=Tidal.Height..cm.,group=NA, color = day_night))+
+    scale_color_manual(values=c("night"="black","day"="orange"))+
+
+  theme_linedraw()
+
+
+ggarrange(fring,tide,ncol=1)
+
+```
+
+
+
+We can actually get decently close predictions of logger height by manually extracting emergence times from the temperature data, and lining those up with the tide series. Note that this is not a harmonic tide station, but rather the prediction from a global tide model -  any departures from the tide series may be that the barrier reef alters the timing and duration of low tide intervals, as observed on the Grand Récif in Toliara (@chevalier2015, @moustapha2021). We calculated the temperature logger to be only `r a$datums[1]` and a logger height of `r a$datums[2]`
+
+```{r,echo=F,warning=F}
+
+tide_height<-read.csv('tide_height_table.csv')
+
+max_hour<-6
+interval_minute<-1
+temp_data<-salary_temps%>%
+  dplyr::filter(site == "saleb8_flat")
+
+tide_data<-mada_tide%>%
+  rename("datetime"="Datetime",
+         "height"="Tidal.Height..cm.")%>%
+  mutate("height"=height/100)%>%
+  dplyr::filter(datetime>=min(temp_data$datetime),
+                datetime<=max(temp_data$datetime))%>%
+  na.omit(.)
+  
+  
+submergence_data<-tide_height%>%
+  rename("datetime"="Datetime")%>%
+  mutate("datetime"=as.POSIXct(datetime,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa"))%>%
+  dplyr::filter(datetime>as.POSIXct("2023-09-03 18:00:00"))
+
+#run
+a<-tide_findR(max_hour=max_hour,
+              interval_minute=interval_minute,
+              tide_data=tide_data,
+              submergence_data=submergence_data$datetime,
+              temp_data = temp_data)
+
+a$datums
+
+split_tide<-ggplot(data = a$temp_data, aes(x = datetime, y = temp, color = status, group = 1)) +
+  geom_line() +
+  theme_linedraw() +
+  scale_color_manual(
+    values = c("exposed" = "firebrick", "submerged" = "cornflowerblue"),
+    labels = c("Exposed", "Submerged")
+  ) +
+  labs(color = "Logger Status", y = "Temp (⁰C)",  x = "") +
+  scale_x_datetime(date_breaks = "1 months", date_labels = "%b %Y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("figures/saleb8_flat_tide_status.svg", width = 6, height = 4, bg="transparent")
+
+
+```
+
+
+
+
+```{r,echo=F,warning=F}
+#residuals of intertidal logger from water temperature (taken at saleb5_lagoon) and air temperature (taken from saleb10_chezfred)
+
+# Step 1: Round datetime for everyone
+salary_temps2 <- salary_temps %>%
+  mutate(datetime = floor_date(datetime, "15 minutes"))
+
+# Step 2: Generate full sequence of time bins
+full_times <- tibble(datetime = seq(
+  floor_date(min(salary_temps2$datetime), "15 minutes"),
+  ceiling_date(max(salary_temps2$datetime), "15 minutes"),
+  by = "15 min"
+))
+
+# Step 3: Join each site to full time grid to ensure all time points are present and pivot to wider
+salary_temps_wide <- salary_temps2 %>%
+  group_by(site) %>%
+  right_join(full_times, by = "datetime") %>%
+  ungroup() %>%
+  dplyr::select(datetime, site, temp,day_night) %>%
+  pivot_wider(names_from = site, values_from = temp)%>%
+  mutate("tide"=a$temp_data$status[match(datetime,floor_date(a$temp_data$datetime, "15 minutes"))])%>%
+  na.omit()
+
+resid_dataframe<-data.frame("datetime"=salary_temps_wide$datetime,"tide_exposure"=salary_temps_wide$tide,"nightday"=salary_temps_wide$day_night)
+
+mod2<-lm(saleb8_flat ~ saleb5_lagoon * day_night * tide, data = salary_temps_wide)
+resid_dataframe$resids2 <- mod2$residuals
+
+mod4<-lm(saleb8_flat ~ saleb10_chezFred * day_night * tide, data = salary_temps_wide)
+resid_dataframe$resids4 <- mod4$residuals
+
+
+#capitalize exposure keys
+resid_dataframe$tide_exposure<-ifelse(resid_dataframe$tide_exposure=="submerged","Submerged","Exposed")
+resid_dataframe$nightday<-ifelse(resid_dataframe$nightday=="day","Day","Night")
+
+resid_dataframe$group<-paste(resid_dataframe$tide_exposure, resid_dataframe$nightday, sep=" \n")
+
+lagoon_flat<-ggplot(data=resid_dataframe,aes(x=datetime,y=resids2,color=tide_exposure))+
+  geom_point(size=.5)+
+  labs(x="Date",y="Residuals (⁰C)",color="Tide Exposure",title="Flats - Lagoon Residuals")+
+  theme_linedraw()+
+  scale_color_manual(values=c("Submerged"="cornflowerblue","Exposed"="firebrick")) +
+  scale_x_datetime(date_breaks = "1 months", date_labels = "%b %Y") +
+  gghighlight(tide_exposure=="Submerged") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+comparisonsa <- list(
+  c("Submerged \nDay", "Submerged \nNight")
+  
+)
+
+comparisonsb <- list(
+  c("Exposed \nDay", "Exposed \nNight")
+
+)
+
+sunnight_lagoon_flat<-ggplot(resid_dataframe[resid_dataframe$tide_exposure=="Submerged",], aes(x = group, y = resids2, fill = nightday)) +
+  geom_violin() +
+  scale_fill_manual(values = c("Night" = "midnightblue", "Day" = "gold")) +
+  labs(x="",y = "Residuals (⁰C)", fill = "Solar Exposure") +
+  theme_linedraw() +
+  geom_signif(comparisons = comparisonsa,
+              map_signif_level = TRUE,
+              step_increase = 0.1,
+              textsize = 4,
+              tip_length = 0.01) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_y_continuous(limits=c(-5,28))
+
+
+
+air_flat<-ggplot(data=resid_dataframe,aes(x=datetime,y=resids4,color=tide_exposure))+
+  geom_point(size=.5)+
+  labs(x="Date",y="Residuals (⁰C)",color="Tide Exposure",title = "Flats - Air Temperature residuals")+
+  theme_linedraw()+
+  scale_color_manual(values=c("Submerged"="cornflowerblue","Exposed"="firebrick"))+
+  scale_x_datetime(date_breaks = "1 months", date_labels = "%b %Y") +
+  gghighlight(tide_exposure=="Exposed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+sunnight_air_flat<-ggplot(data=resid_dataframe[resid_dataframe$tide_exposure=="Exposed",],aes(x=group,y=resids4,fill=nightday))+
+  geom_violin() +
+    scale_fill_manual(values=c("Night"="midnightblue","Day"="gold")) +
+    labs(y="Residuals (⁰C)",fill="Solar Exposure",x="")+
+    theme_linedraw()+
+  geom_signif(comparisons = comparisonsb,
+              map_signif_level = TRUE,
+              step_increase = 0.1,
+              textsize = 4,
+              tip_length = 0.01) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_y_continuous(limits=c(-10,25))
+
+
+lower_part<-plot_grid(ncol=2,nrow=2, lagoon_flat,sunnight_lagoon_flat, air_flat,sunnight_air_flat,labels=c("B","C","D","E"),common.legend=T,legend="right",widths=c(2,1),heights=c(1,1),align="hv",axis="bt")
+
+plot_grid(split_tide,lower_part,labels=c("A",""),nrow=2,ncol=1,align="hv",heights=c(1,5))
+
+ggsave("figures/residuals_flat.png", width = 8, height = 8, bg="white")
+```
+We can look at the frequency of of exposure-hours given a -100cm elevation. 
+
+```{r,echo=F,warning=F}
+
+
+mada_tide_clean <- mada_tide %>%
+  rename(tide_cm = `Tidal.Height..cm.`,
+         datetime = Datetime) %>%
+  mutate(datetime = ymd_hms(datetime))
+
+below_thresh <- mada_tide_clean %>%
+  filter(tide_cm < -100) %>%
+  arrange(datetime)
+
+
+sampling_interval <- median(diff(below_thresh$datetime), na.rm = TRUE)
+
+below_thresh <- below_thresh %>%
+  arrange(datetime) %>%
+  mutate(
+    time_diff = as.numeric(difftime(datetime, lag(datetime), units = "secs")),
+    new_period = ifelse(is.na(time_diff) | time_diff > 2 * as.numeric(sampling_interval, units = "secs"), 1, 0),
+    group = cumsum(new_period)
+  )
+
+
+periods <- below_thresh %>%
+  group_by(group) %>%
+  summarise(
+    start = min(datetime),
+    end = max(datetime),
+    duration_hrs = as.numeric(difftime(max(datetime), min(datetime), units = "hours")),
+    .groups = "drop"
+  )
+
+summary_stats <- periods %>%
+  na.omit()%>%
+  summarise(
+    mean_duration_hrs = mean(duration_hrs),
+    max_duration_hrs = max(duration_hrs),
+    min_duration_hrs = mean(duration_hrs),
+    n_periods = n()
+  )
+
+summary_stats
+
+svg("figures/emersion_freq.svg",width=4,height=4)
+ggplot(periods, aes(x = duration_hrs)) +
+  geom_histogram(binwidth = 0.25, fill = "steelblue", color = "black") +
+  labs(x = "Duration (hours)",
+       y = "Inundation Frequency") +
+  theme_linedraw() +
+  geom_vline(aes(xintercept=mean(na.omit(duration_hrs))),linetype="dotted")
+dev.off()
+
+```
+
+
+# Spectral analysis
+
+Here, I look at the spectral behavior of the temperature logger data to parse out any cyclical trends. First, we look at SALEB8
+```{r,echo=F,warning=F,results='hide'}
+
+ wavelet_salary_flat <- analyze.wavelet(salary_temps%>%filter(site=="saleb8_flat"), "temp",
+                                           loess.span = 0,
+                                           dt = 1/4, # we are interested in hours
+                                           dj = 0.05,
+                                           lowerPeriod = 1/4, # lowest period of interest is 15 minutes
+                                           upperPeriod = 365*24,
+                                           make.pval = TRUE, n.sim = 100, date.format = "%m",verbose=F)
+
+
+
+png("figures/wavelet_salary_flat.png", width = 8, height = 6,bg="white", units="in",res=300) 
+
+layout(matrix(c(1, 2), nrow = 1), widths = c(2, 1))
+
+wt.image(wavelet_salary_flat, color.key = "quantile", n.levels = 100,
+                   lvl = 4,
+                   legend.params = list(lab = "Wavelet Power Levels"),
+                   max.contour.segments = 250000,
+                   plot.contour = T,
+                   col.contour="black",
+                   periodlab = "Wavelet Period (hours)", 
+                   useRaster = T,
+                   plot.ridge = F,
+                   date.format = "%b %Y", 
+                   show.date = TRUE, 
+                   timelab = "",
+         graphics.reset=F,
+         siglvl=0.01)
+  abline(h = log(8)/log(2),lty=3,lwd=2)
+  abline(h = log(12.4)/log(2),lty=3,lwd=2)
+  abline(h = log(24)/log(2),lty=3,lwd=2)
+  abline(h = log(24*14)/log(2),lty=3,lwd=2)
+  mtext("A", side = 3, line = 0.5, adj = 0, font = 2)
+  
+  
+ wt.avg(wavelet_salary_flat, maximum.level = max(wavelet_salary_lag$Power.avg),
+        siglvl = c(0.01),
+        averagelab="Average Power Spectra",
+        periodlab = "",
+        show.legend=F,
+        col="red")
+ abline(h = log(8)/log(2),lty=3,lwd=2)
+ abline(h = log(12.4)/log(2),lty=3,lwd=2)
+ abline(h = log(24)/log(2),lty=3,lwd=2)
+ abline(h=(log(24*14)/log(2)),lty=3,lwd=2)
+ text(x=1,y=log(6)/log(2),labels="8h",cex=1,font=2)
+ text(x=1,y=log(16)/log(2),labels="12.4h",cex=1,font=2)
+ text(x=1,y=log(32)/log(2),labels="24h",cex=1,font=2)
+ text(x=1,y=log(24*14+75)/log(2),labels="2w",cex=1,font=2)
+ mtext("B", side = 3, line = 0.5, adj = 0, font = 2)
+
+  dev.off()
+
+
+```
+
+Next, SALEB1, 3, 5, and 10
+
+```{r,echo=F,warning=F,results='hide'}
+#saleb1
+ wavelet_salary_bom <- analyze.wavelet(salary_temps%>%filter(site=="saleb1_bommie"), "temp",
+                                           loess.span = 0,
+                                           dt = 1/4, # we are interested in hours
+                                           dj = .05,
+                                           lowerPeriod = 1/4, # lowest period of interest is 15 minutes
+                                           upperPeriod = 365*24,
+                                           make.pval = TRUE, n.sim = 25, date.format = "%m",verbose=F)
+
+
+  
+  #saleb3
+   wavelet_salary_backreef <- analyze.wavelet(salary_temps%>%filter(site=="saleb3_rubble"), "temp",
+                                           loess.span = 0,
+                                           dt = 1/4, # we are interested in hours
+                                           dj = .05,
+                                           lowerPeriod = 1/4, # lowest period of interest is 15 minutes
+                                           upperPeriod = 365*24,
+                                           make.pval = TRUE, n.sim = 25, date.format = "%m",verbose=F)
+
+
+  
+  #saleb5
+  
+  wavelet_salary_lagoon <- analyze.wavelet(salary_temps%>%filter(site=="saleb5_lagoon"), "temp",
+                                           loess.span = 0,
+                                           dt = 1/4, # we are interested in hours
+                                           dj = .05,
+                                           lowerPeriod = 1/4, # lowest period of interest is 15 minutes
+                                           upperPeriod = 365*24,
+                                           make.pval = TRUE, n.sim = 25, date.format = "%m %Y",verbose=F)
+
+
+  
+  #saleb10
+  
+    wavelet_salary_air <- analyze.wavelet(salary_temps%>%filter(site=="saleb10_chezFred"), "temp",
+                                           loess.span = 0,
+                                           dt = 1/4, # we are interested in hours
+                                           dj = .05,
+                                           lowerPeriod = 1/4, # lowest period of interest is 15 minutes
+                                           upperPeriod = 365*24,
+                                           make.pval = TRUE, n.sim = 25, date.format = "%m",verbose=F)
+
+
+```
+
+```{r,echo=F,warning=F}
+#2x 
+png("figures/wavelet_supp.png", width = 12, height = 12,bg="white",units="in",res=300)  
+layout(matrix(1:8, ncol = 2, byrow = TRUE), widths = c(2, 1))
+
+# Outer margins (bottom, left, top, right)
+par(oma = c(5, 5, 3, 2))  
+
+# Inner margins (bottom, left, top, right)
+par(mgp = c(3.5, 1, 0))  # More space for axis label, tighter tick-to-axis spacing
+
+# Reduce left margin without crowding label
+par(mar = c(3.5, 3, 2, 1.5))  # Move axis label further from axis ticks
+
+# Optional: Ensure consistent axis label size
+par(cex.axis = 0.8, cex.lab = 1.0)  
+
+# Panel A
+wt.image(wavelet_salary_bom, color.key = "quantile", n.levels = 100,
+                                      lvl = 4,
+                   legend.params = list(lab = "Wavelet Power Levels"),
+                   max.contour.segments = 250000,
+                   plot.contour = T,
+                   col.contour="black",
+                   periodlab = "Wavelet Period (hours)", 
+                   useRaster = T,
+                   plot.ridge = F,
+                   date.format = "%b %Y", 
+                   show.date = TRUE, 
+                   timelab = "",
+         graphics.reset=F,
+         siglvl=0.05)
+  mtext("A) Shallow Lagoon (SALEB1)", side = 3, line = 0.5, adj = 0, font = 2)
+  abline(h = log(12.4)/log(2),lty=3,lwd=2)
+  abline(h = log(24)/log(2),lty=3,lwd=2)
+  
+   wt.avg(wavelet_salary_bom, maximum.level = max(wavelet_salary_bom$Power.avg),
+        siglvl = c(0.05,0.01),
+        averagelab="Average Power Spectra",
+        periodlab = "",
+        show.legend=T,
+        col="red")
+ abline(h = log(12.4)/log(2),lty=3,lwd=2)
+ abline(h = log(24)/log(2),lty=3,lwd=2)
+ text(x=2,y=log(16)/log(2),labels="12.4h",cex=1,font=2)
+ text(x=2,y=log(32)/log(2),labels="24h",cex=1,font=2)
+
+# Panel B
+wt.image(wavelet_salary_backreef, color.key = "quantile", n.levels = 100,
+                                     lvl = 4,
+                   legend.params = list(lab = "Wavelet Power Levels"),
+                   max.contour.segments = 250000,
+                   plot.contour = T,
+                   col.contour="black",
+                   periodlab = "Wavelet Period (hours)", 
+                   useRaster = T,
+                   plot.ridge = F,
+                   date.format = "%b %Y", 
+                   show.date = TRUE, 
+                   timelab = "",
+         graphics.reset=F,
+         siglvl=0.05)
+  mtext("B) Backreef (SALEB3)", side = 3, line = 0.5, adj = 0, font = 2)
+  abline(h = log(12.4)/log(2),lty=3,lwd=2)
+  abline(h = log(24)/log(2),lty=3,lwd=2)
+
+  
+     wt.avg(wavelet_salary_backreef, maximum.level = max(wavelet_salary_backreef$Power.avg),
+        siglvl = c(0.05,0.01),
+        averagelab="Average Power Spectra",
+        periodlab = "",
+        show.legend=T,
+        col="red")
+ abline(h = log(12.4)/log(2),lty=3,lwd=2)
+ abline(h = log(24)/log(2),lty=3,lwd=2)
+ text(x=2,y=log(16)/log(2),labels="12.4h",cex=1,font=2)
+ text(x=2,y=log(32)/log(2),labels="24h",cex=1,font=2)
+
+# Panel C
+wt.image(wavelet_salary_lagoon, color.key = "quantile", n.levels = 100,
+                                      lvl = 4,
+                   legend.params = list(lab = "Wavelet Power Levels"),
+                   max.contour.segments = 250000,
+                   plot.contour = T,
+                   col.contour="black",
+                   periodlab = "Wavelet Period (hours)", 
+                   useRaster = T,
+                   plot.ridge = F,
+                   date.format = "%b %Y", 
+                   show.date = TRUE, 
+                   timelab = "",
+         graphics.reset=F,
+         siglvl=0.05)
+  mtext("C) Deep Lagoon (SALEB5)", side = 3, line = 0.5, adj = 0, font = 2)
+  abline(h = log(12.4)/log(2),lty=3,lwd=2)
+  abline(h = log(24)/log(2),lty=3,lwd=2)
+
+  
+     wt.avg(wavelet_salary_lagoon, maximum.level = max(wavelet_salary_lagoon$Power.avg),
+        siglvl = c(0.05,0.01),
+        averagelab="Average Power Spectra",
+        periodlab = "",
+        show.legend=T,
+        col="red")
+ abline(h = log(12.4)/log(2),lty=3,lwd=2)
+ abline(h = log(24)/log(2),lty=3,lwd=2)
+ text(x=1.3,y=log(16)/log(2),labels="12.4h",cex=1,font=2)
+ text(x=1.3,y=log(32)/log(2),labels="24h",cex=1,font=2)
+
+# Panel D
+wt.image(wavelet_salary_air, color.key = "quantile", n.levels = 100,
+                                      lvl = 4,
+                   legend.params = list(lab = "Wavelet Power Levels"),
+                   max.contour.segments = 250000,
+                   plot.contour = T,
+                   col.contour="black",
+                   periodlab = "Wavelet Period (hours)", 
+                   useRaster = T,
+                   plot.ridge = F,
+                   date.format = "%b %Y", 
+                   show.date = TRUE, 
+                   timelab = "",
+         graphics.reset=F,
+         siglvl=0.05)
+  mtext("D) Air Temperature (SALEB10)", side = 3, line = 0.5, adj = 0, font = 2)
+  abline(h = log(12)/log(2),lty=3,lwd=2)
+  abline(h = log(24)/log(2),lty=3,lwd=2)
+
+  
+       wt.avg(wavelet_salary_air, maximum.level = max(wavelet_salary_air$Power.avg),
+        siglvl = c(0.05,0.01),
+        averagelab="Average Power Spectra",
+        periodlab = "",
+        show.legend=T,
+        col="red")
+ abline(h = log(12)/log(2),lty=3,lwd=2)
+ abline(h = log(24)/log(2),lty=3,lwd=2)
+ text(x=3,y=log(16)/log(2),labels="12h",cex=1,font=2)
+ text(x=3,y=log(32)/log(2),labels="24h",cex=1,font=2)
+dev.off()
+  
+```
+
+Let's compare the wavelet coherency across all subtidal sites
+
+```{r,echo=F,warning=F,eval=F}
+#round each datetime to nearest 15 minut interval
+
+# Step 1: Round datetime for everyone
+salary_temps2 <- salary_temps %>%
+  mutate(datetime = floor_date(datetime, "15 minutes"))
+
+# Step 2: Generate full sequence of time bins
+full_times <- tibble(datetime = seq(
+  floor_date(min(salary_temps2$datetime), "15 minutes"),
+  ceiling_date(max(salary_temps2$datetime), "15 minutes"),
+  by = "15 min"
+))
+
+# Step 3: Join each site to full time grid to ensure all time points are present and pivot to wider
+salary_temps_wide <- salary_temps2 %>%
+  group_by(site) %>%
+  right_join(full_times, by = "datetime") %>%
+  ungroup() %>%
+  dplyr::select(datetime, site, temp) %>%
+  pivot_wider(names_from = site, values_from = temp)
+
+
+
+saleb_1_5<-salary_temps_wide%>%
+  dplyr::select(datetime, saleb1_bommie, saleb5_lagoon)%>%
+  na.omit()
+
+saleb_1_8<-salary_temps_wide%>%
+  dplyr::select(datetime, saleb1_bommie, saleb8_flat)%>%
+  na.omit()
+
+#two reef sites
+coherency_saleb_1_5 <- analyze.coherency(saleb_1_5, my.pair = c("saleb1_bommie","saleb5_lagoon"),
+ loess.span = 0,
+ dt = 1/4, dj = 1/4,
+ lowerPeriod = 1/4,
+ upperPeriod = 365*24,
+make.pval = TRUE, n.sim = 25, date.format = "%m",verbose=F,
+window.size.t=5,window.size.s=5/4)
+
+#intertidal and reef site
+coherency_saleb_1_8 <- analyze.coherency(saleb_1_8, my.pair = c("saleb1_bommie","saleb8_flat"),
+ loess.span = 0,
+ dt = 1/4, dj = 1/4,
+ lowerPeriod = 1/4,
+ upperPeriod = 365*24,
+make.pval = TRUE, n.sim = 25, date.format = "%m",verbose=F,
+window.size.t=5,window.size.s=5/4)
+
+saveRDS(coherency_saleb_1_5,"data/coherency_saleb_1_5.rds")
+
+saveRDS(coherency_saleb_1_8,"data/coherency_saleb_1_8.rds")
+```
+
+```{r,echo=F,warning=F}
+
+coherency_saleb_1_5<-readRDS("data/coherency_saleb_1_5.rds")
+coherency_saleb_1_8<-readRDS("data/coherency_saleb_1_8.rds")
+
+wc.image(coherency_saleb_1_5, n.levels = 100,
+ legend.params = list(lab = "cross-wavelet power levels, saleb 1 and 5"),
+ timelab = "Timestamp", periodlab = "period (RR interval), hours",
+ useRaster = FALSE,plot.ridge = TRUE, date.format = "%m")
+
+wc.image(coherency_saleb_1_8, n.levels = 100,
+ legend.params = list(lab = "cross-wavelet power levels, saleb 1 and 8"),
+ timelab = "Timestamp", periodlab = "period (RR interval), hours",
+ useRaster = FALSE,plot.ridge = TRUE, date.format = "%m")
+
+```
+
+
+
+# Low tide timing, decadal
+
+```{r,echo=F,warning=F,eval=F,results='hide'}
+
+ephem_span<-length(seq.POSIXt(from=as.POSIXct("2006-01-01 00:00:00",tz="Africa/Addis_Ababa"),to=as.POSIXct("2024-12-31 23:59:00",tz="Africa/Addis_Ababa"),by="day"))
+
+ mada_ephem_18<-ephemeris_hms(lat=-22.6,lon=43.25,date="2006-01-01 00:00:00",span=ephem_span,tz="Africa/Addis_Ababa")
+ 
+ mada_ephem_18 <- mada_ephem_18 %>%
+  mutate(
+    sunrise.time = floor_date(sunrise.time, "minute"),
+    sunset.time = floor_date(sunset.time, "minute"),
+    true_date = as.Date(date),
+    month = month(date),
+    hour = month
+  )
+ 
+tide_data<-list.files(path = "tide", pattern = "20\\d{2}\\.csv$", full.names = TRUE)
+
+all_tide_data<-vector("list",length=length(tide_data))
+
+for (i in 1:length(tide_data)){
+tide_data_i<-read.csv(tide_data[i])
+tide_data_i<-tide_data_i%>%rename("datetime"="Datetime..UTC.","tide_height"="Tidal.Height..cm.")
+tide_data_i$date<-as.Date(tide_data_i$datetime,format="%Y-%m-%d")
+tide_data_i$datetime_posix<-seq.POSIXt(from=as.POSIXct((min(tide_data_i$datetime)),tz="Africa/Addis_Ababa"),to=as.POSIXct(max(tide_data_i$datetime),tz="Africa/Addis_Ababa")+lubridate::hms("23:59:00"),by="min")
+salary_date_seq_i<-seq.POSIXt(min(as.POSIXct(tide_data_i$datetime_posix)),max(as.POSIXct(tide_data_i$datetime_posix)),by="day")
+
+tide_data_vec_ij<-vector("list",length=length(salary_date_seq_i))
+#each day
+for (j in seq_along(salary_date_seq_i)) {
+  date_j<-unique(lubridate::ymd(salary_date_seq_i[j]))
+  #tide_data_i_j<-tide_data_i%>%dplyr::filter(date==date_j)
+
+
+  # Get sunrise and sunset times for the current date
+  sunrise.time_j <- mada_ephem_18[mada_ephem_18$true_date == salary_date_seq_i[j], "sunrise.time"]
+  sunset.time_j <- mada_ephem_18[mada_ephem_18$true_date == salary_date_seq_i[j], "sunset.time"]
+  
+  # Identify rows for the current date in `salary_temps` as a logical vector
+  temp_day_j <- tide_data_i$date == salary_date_seq_i[j]
+  
+  
+  # Apply the day/night assignment for each row for the current date
+  tide_data_i$day_night[temp_day_j] <- ifelse(
+    tide_data_i$datetime_posix[temp_day_j] > sunrise.time_j & tide_data_i$datetime_posix[temp_day_j] < sunset.time_j,
+    "day", "night"
+  )
+  #tide_data_vec_ij[[j]]<-tide_data_i
+}
+all_tide_data[[i]]<-tide_data_i
+
+}
+
+all_tide_data_b<-bind_rows(all_tide_data)
+
+
+ 
+write.csv(all_tide_data_b,"all_tide_data_18.csv")
+
+```
+
+```{r,echo=F,warning=F,eval=F,results='hide'}
+all_tide_data<-read.csv("all_tide_data_18.csv")
+all_tide_data$datetime_posix<-as.POSIXct(all_tide_data$datetime_posix,format="%Y-%m-%d %H:%M:%S",tz="Africa/Addis_Ababa")+lubridate::hours(3)#convert from UTC to EAT
+
+ hours_100<-all_tide_data%>%
+  mutate(year = year(datetime), 
+         month = month(datetime, label = TRUE))%>%
+   group_by(year,month)%>%
+  summarize(hours = sum(tide_height < -100, na.rm = TRUE) / 60, .groups = "drop")
+ write.csv(hours_100,"hours_100.csv")
+
+
+ min_ht_months<-all_tide_data%>%
+  mutate(year = year(datetime), 
+         month = month(datetime, label = TRUE))%>%
+   group_by(year,month)%>%
+    summarize(min = min(tide_height))
+ write.csv(min_ht_months,"min_ht_months.csv")
+ 
+hours_100_daynight<-all_tide_data%>%
+  mutate(year = year(datetime), 
+         month = month(datetime, label = TRUE))%>%
+   group_by(year,month,day_night)%>%
+  summarize(hours = sum(tide_height < -100, na.rm = TRUE) / 60, .groups = "drop")
+write.csv(hours_100_daynight,"hours_100_daynight.csv")
+
+
+ min_ht_months_daynight<-all_tide_data%>%
+  mutate(year = year(datetime), 
+         month = month(datetime, label = TRUE))%>%
+   group_by(year,month,day_night)%>%
+    summarize(min = min(tide_height))
+ write.csv(min_ht_months_daynight,"min_ht_months_daynight.csv")
+ 
+ rm(all_tide_data)
+```
+
+To visualize how the tidal series changes with year over 18 years, we focus on two metrics: 1) The number of hours where the tide is below -100cm, and 2) The minimum height each month. We can further visualize these by day and night number of hours and minimum height, to see if low tides switch from day to night over certain years. 
+
+We color-coded each month based on the maximum monhly daytime temperature, as given by the table below. March and September daytime were the hottest in our 2023/2024 dataset, with June and December having the coldest daytime temperatures. Hottest nighttime temperatures occurred in January and February, coldest nighttime temperatures occurred in July and August.
+
+```{r,echo=F,results='hide'}
+kable(max_temps_inter)
+```
+
+```{r,echo=F,warning=F,results='hide'}
+ranked_months<-max_temps_inter %>%
+  dplyr::filter(day_night=="day")%>%
+  summarise(avg=mean(maxtemp))%>%
+  arrange(desc(avg))%>%
+  dplyr::select(month)
+
+month_colors <- met.brewer("Johnson", 12)
+
+
+# Combine months and colors
+names(month_colors) <- factor(ranked_months$month,levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+
+
+hours_100<-read.csv("hours_100.csv")
+hours_100$month <- factor(hours_100$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+min_ht_months<-read.csv("min_ht_months.csv")
+min_ht_months$month <- factor(min_ht_months$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+hours_100_daynight<-read.csv("hours_100_daynight.csv")
+hours_100_daynight$month <- factor(hours_100_daynight$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+min_ht_months_daynight<-read.csv("min_ht_months_daynight.csv")
+min_ht_months_daynight$month <- factor(min_ht_months_daynight$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+
+
+ggplot()+geom_line(data=hours_100,aes(x=year,y=hours,color=month,group=month))+
+  theme_linedraw()+
+  labs(x="Year",y="Hours below -100cm (MWL)",color="Month")+
+  scale_color_manual(values=month_colors) +
+  geom_label()
+```
+
+We clearly see that March (the hottest intertidal month) spends the most number of hours below -100cm almost universally, occasionally switching with November, April, and May. Importantly, the coldest intertidal temperatures are always experienced when the tide spends the least amount of time below -100cm in June, followed closely by December, January, and July. There appears to be a general sinusoid shape to these shorter innundation months.
+
+This trend is even more apparent when we group months by seasons.
+
+```{r,echo=F,warning=F,results='hide'}
+
+winter<-c("Nov","Dec","Jan")
+spring<-c("Feb","Mar","Apr")
+summer<-c("May","Jun","Jul")
+fall<-c("Aug","Sep","Oct")
+
+rainy<-c("Nov","Dec","Jan","Feb","Mar")
+dry<-c("Apr","May","Jun","Jul","Aug","Sep","Oct")
+
+
+season_colors <- viridis(4)
+wetdry_colors<-viridis(2)
+
+names(season_colors) <- c("Late Hot-Wet (Feb-Apr)","Late Warm-Dry (Aug-Oct)","Early Warm-Dry (May-Jul)","Early Hot-Wet (Nov-Jan)")
+
+
+
+season_levels <- c(
+  "Early Hot-Wet (Nov-Jan)",
+  "Late Hot-Wet (Feb-Apr)",
+  "Early Warm-Dry (May-Jul)",
+  "Late Warm-Dry (Aug-Oct)"
+)
+names(wetdry_colors) <- c("Wet","Dry")
+
+hours_100_daynight <- hours_100_daynight %>%
+  mutate(
+    season = case_when(
+      month %in% summer ~ "Early Warm-Dry (May-Jul)",
+      month %in% fall ~ "Late Warm-Dry (Aug-Oct)",
+      month %in% winter ~ "Early Hot-Wet (Nov-Jan)",
+      month %in% spring ~ "Late Hot-Wet (Feb-Apr)"
+    ),
+    season = factor(season, levels = season_levels),
+    day_night = case_when(
+      day_night == "day" ~ "Day",
+      day_night == "night" ~ "Night"
+    ),
+    day_night = factor(day_night, levels = c("Day", "Night"))
+  )
+
+
+
+hours_100_wd <- hours_100_daynight %>%
+  mutate(season = case_when(
+    month %in% rainy ~ "Rainy",
+    month %in% dry ~ "Dry"))
+
+hours_below_season<-ggplot()+
+  geom_point(data=hours_100_daynight,aes(x=year,y=hours,color=season,group=season,shape=day_night))+
+  theme_linedraw()+
+  labs(x="Year",y="Hours below -1m",color="Season",linetype="Time of Day",shape="Time of Day")+
+  geom_smooth(data=hours_100_daynight,aes(x=year,y=hours,color=season,group=interaction(season,day_night),linetype=day_night),method='gam')+
+  scale_color_manual(values=season_colors) 
+hours_below_season
+ggsave("figures/hours_below_season.svg",
+       width = 6, height = 4, units = "in", dpi = 300)
+
+ggplot()+
+  geom_point(data=hours_100_daynight,aes(x=year,y=hours,color=month,group=month,linetype=season))+
+  theme_linedraw()+
+  labs(x="Year",y="Hours below -100cm",color="Month",linetype="Season")+
+  geom_smooth(data=hours_100_wd,aes(x=year,y=hours,color=month,group=month,linetype=season),method='gam')+
+  #scale_color_viridis_d() +
+  scale_color_manual(values=month_colors)
+
+
+```
+
+Another way to look at this data is to examine how minimum tide height each month changes with year. We see here that while the minimum tide height decreases within the 18 year cycle in June, it is pretty consistent during the hottest and lowest tide month of March. 
+
+```{r,echo=F,warning=F}
+ggplot(data=min_ht_months,aes(x=year,y=min,color=month))+geom_line()+theme_linedraw()+labs(x="Year",y="Minimum Tide Height",color="Month")+scale_color_manual(values=month_colors)
+
+```
+
+Now, another question is if the diel timing of extreme low tides changes at all across years. Interestingly, we see that except in the most extreme months of March and September, which have equal hours below -100cm no matter the year, each month has either more or less hours below -100cm during the day compared to the night. In January and December, there are more low tide hours at night. In June and July, this is reversed, with more low tide hours dueing the day. 
+
+```{r,echo=F}
+
+hours_100_monthdaynight<-ggplot(data=hours_100_daynight,aes(x=year,y=hours,linetype=day_night,color=month,group=interaction(day_night,month)))+
+  facet_wrap(.~month)+geom_line()+
+  labs(x="Year",y="Hours below -1m",color="Month",linetype="Time of Day")+
+  theme_linedraw() +scale_color_manual(values=month_colors)+
+  theme(axis.text.x=element_text(angle=45))
+
+hours_100_monthdaynight
+
+```
+
+
+When it comes to minimum tide height, we see similar results. March/April and September/October have the lowest tides, which do not differ much day vs. night. But, in January and February, the biggest tides are at night. In June and July, the biggest tides are during the day. In both of these examples, the tides are relatively small, but approach larger tides on 18 year cycles. 
+
+```{r,echo=F}
+
+min_ht_months_daynight <- min_ht_months_daynight %>%
+  mutate(
+    day_night = case_when(
+      day_night == "day" ~ "Day",
+      day_night == "night" ~ "Night"
+    ),
+    day_night = factor(day_night, levels = c("Day", "Night"))
+  )
+
+minimum_height_daymonth<-ggplot(data=min_ht_months_daynight,aes(x=year,y=min/100,linetype=day_night,color=month,group=interaction(month,day_night)))+facet_wrap(.~month)+geom_line()+labs(x="Year",y="Minimum Tide Height (m)",color="Month",linetype="Time of Day")+theme_linedraw()+scale_color_manual(values=month_colors)+theme(axis.text.x=element_text(angle=45))
+
+ggarrange(hours_100_monthdaynight,minimum_height_daymonth,common.legend=T,legend="right",labels=c("A","B"),nrow=2)
+ggsave("figures/month_exposure_comparison.svg",
+       width = 6, height = 9, units = "in", dpi = 300)
+```
+Once again, seasons clarify things for us. Daytime monthly minimum tide height is not very different spring v. fall, but it is very different at night. 
+
+```{r,echo=F,warning=F}
+
+min_ht_months_daynight <- min_ht_months_daynight %>%
+  mutate(season = case_when(
+      month %in% summer ~ "Early Warm-Dry (May-Jul)",
+      month %in% fall ~ "Late Warm-Dry (Aug-Oct)",
+      month %in% winter ~ "Early Hot-Wet (Nov-Jan)",
+      month %in% spring ~ "Late Hot-Wet (Feb-Apr)"),
+      day_night = case_when(
+        day_night == "day" ~ "Day",
+        day_night == "night" ~ "Night"
+      ),
+          day_night = factor(day_night, levels = c("Day", "Night"))
+)
+
+min_tide_height_years<-ggplot()+
+  geom_point(data=min_ht_months_daynight,aes(x=year,y=min/100,color=season,shape=day_night ,group=interaction(season,day_night )))+
+  theme_linedraw()+
+  labs(x="Year",y="Minimum Tide Height (m)",color="Season",linetype="Time of Day",shape="Time of Day")+
+  geom_smooth(data=min_ht_months_daynight,aes(x=year,y=min/100,color=season,linetype=day_night ,group=interaction(season,day_night )),method='gam')+
+  scale_color_manual(values=season_colors)
+
+min_tide_height_years
+```
+
+```{r,echo=F,warning=F}
+
+ggarrange(hours_below_season,min_tide_height_years,common.legend=T,legend="right",labels=c("A","B"),nrow=2)
+
+ggsave("figures/season_exposure_comparison.svg",
+       width = 6, height = 8, units = "in", dpi = 300)
+```
+
+
+# Low tide timing, monthly
+
+Now that we have explored across year, let's explore trends across months.
+
+First, we see that extreme tides occur in February and March, and again in September and October. More hours are spent below -100cm during the nighttime in the austral summer, while more hours below -100cm during the daytime in the austral winter.  
+ 
+```{r,echo=F,warning=F}
+
+hours_18_mean<-hours_100%>%
+  group_by(month)%>%
+  summarise(mean=mean(hours))
+hours_18_mean$month<-factor(hours_18_mean$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+
+ggplot(data = hours_100, aes(y = hours, x = month)) +
+     geom_line(aes(group = year, color = (year))) +  
+     geom_smooth(data = hours_18_mean, aes(x = month, y = mean, group = 1),                    
+    method = 'gam', se = TRUE, color = "red") +  
+     theme_minimal() +
+     labs(x = "Month", y = "Number of Hours < -100cm", color = "Year") 
+
+hours_18_mean_dn<-hours_100_daynight%>%
+  group_by(month,day_night)%>%
+  summarise(mean=mean(hours))
+
+hours_18_mean_dn$month<-factor(hours_18_mean_dn$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+ggplot(data = hours_100_daynight, aes(y = hours, x = month,linetype = day_night)) +
+     geom_line(aes(group = interaction(year,day_night), color = year)) +  
+     geom_smooth(data = hours_18_mean_dn, aes(x = month, y = mean, linetype=day_night,group=day_night),                    
+    method = 'gam', se = TRUE, color = "red") +  
+     theme_minimal() +
+     labs(x = "Month", y = "Number of Hours < -100cm", color = "Year",linetype="Day/Night Exposure")
+```
+
+We see similar results when we examine minimum tidal height. Austral fall and spring dominate the most extreme tides, while winter and summer have less extreme tides. Between march and September, the most extreme tides are experienced during the day. 
+
+```{r,echo=F}
+min_ht_months_18_mean<-min_ht_months%>%
+  group_by(month)%>%
+  summarise(mean=mean(min))
+min_ht_months_18_mean$month<-factor(min_ht_months_18_mean$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+ggplot(data = min_ht_months, aes(y = min, x = month)) +
+     geom_line(aes(group = year, color = (year))) +  
+     geom_smooth(data = min_ht_months_18_mean, aes(x = month, y = mean, group = 1),                    
+    method = 'gam', se = TRUE, color = "red") +  
+     theme_minimal() +
+     labs(x = "Month", y = "Minimum Monthly Height (cm)", color = "Year")
+
+
+min_ht_months_18_mean_dn<-min_ht_months_daynight%>%
+  group_by(month,day_night)%>%
+  summarise(mean=mean(min))
+
+min_ht_months_18_mean_dn$month<-factor(min_ht_months_18_mean_dn$month, 
+                                   levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+ggplot(data = min_ht_months_daynight, aes(y = min, x = month,linetype = day_night)) +
+     geom_line(aes(group = interaction(year,day_night), color = year)) +  
+     geom_smooth(data = min_ht_months_18_mean_dn, aes(x = month, y = mean, group = day_night),                    
+    method = 'gam', se = TRUE, color = "red") +  
+     theme_minimal() +
+     labs(x = "Month", y = "Minimum Monthly Height (cm)", color = "Year",linetype="Day/Night Exposure")
+```
+
+
+# Hourly occurrence of lowest tides
+
+Does the daily minimum always occur during midday?
+
+```{r,echo=F,warning=F}
+
+
+all_tide_data<-read.csv("all_tide_data_18.csv")
+
+all_tide_data$datetime_posix<-as.POSIXct(all_tide_data$datetime_posix,format="%Y-%m-%d %H:%M:%S",tz="Africa/Addis_Ababa")+lubridate::hours(3)
+
+all_tide_data_tile<-all_tide_data%>%
+  mutate(date=as.POSIXct(as.Date(datetime)),
+         hour=lubridate::hour(datetime_posix),
+         year=year(datetime_posix),
+         month=month(datetime_posix, label = TRUE))
+rm(all_tide_data)
+
+hour_min<-all_tide_data_tile%>%  mutate(date = as.Date(datetime), 
+         month = month(datetime, label = TRUE),
+         year = year(datetime))%>%
+      group_by(year,month,hour)%>%
+    summarize(min = min(tide_height))
+
+hour_cumulative<-all_tide_data_tile%>%  mutate(date = as.Date(datetime), 
+         month = month(datetime, label = TRUE),
+         year = year(datetime))%>%
+      group_by(year,month,hour)%>%
+  summarize(cumulative = sum(tide_height < -100, na.rm = TRUE), .groups = "drop")
+
+min_heatmap_year<-ggplot(data = hour_min, aes(x = hour, y = year, fill = min/100)) +
+  geom_tile() +
+  theme_linedraw() +
+  labs(
+    x = "Hour of Day",
+    y = "Year",
+    fill = "Monthly Minimum \nTide Height (m)"
+  ) +
+  scale_fill_gradient2(
+    midpoint = -1,
+    low = "red",
+    mid = "white",
+    high = "blue",
+    na.value = "grey90",
+    breaks=c(-.4,-.8,-1,-1.2,-1.6)
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, by = 4)) +
+  scale_y_continuous(breaks =seq(2006,2024,by=2)) +
+  facet_wrap(.~month) +
+  theme(axis.text.x=element_text(angle=45))
+ggsave("figures/min_heatmap_year.png",
+       plot = min_heatmap_year,
+       width = 6, height = 6, units = "in", dpi = 300)
+
+
+
+
+
+```
+
+
+
+
+Below, we use a custom function I wrote to visualize tide height throuhout 15 years of tide data, with times and dates of tides below a certain height (here, -89.7cm, the height of our intertidal logger) colored in red.  
+
+```{r,echo=F,eval=F}
+low_cutoff<-(-100)
+
+mada_tide_tile<-mada_tide%>%mutate(date=as.POSIXct(as.Date(Datetime)),hour=lubridate::hour(Datetime))
+
+mada_ephem2<-mada_ephem%>%dplyr::filter(date<=max(mada_tide_tile$date))
+
+tide_map_short<-ggplot() + 
+  geom_tile(data=mada_tide_tile,aes(x=date, y=hour, fill= Tidal.Height..cm.)) +
+  scale_fill_gradient(low="orange",high="purple",limits=c(low_cutoff,max(mada_tide_tile$Tidal.Height..cm.)),na.value="red",name="Tidal height (cm)")+
+  scale_color_gradient(low="orange",high="purple",limits=c(low_cutoff,max(mada_tide_tile$Tidal.Height..cm.)),na.value="red",name="Tidal height (cm)")+
+  scale_y_continuous(breaks=c(0,6,12,18,24))+
+  scale_x_datetime(date_breaks="1 year",date_labels="%Y")+
+  geom_ribbon(data=mada_ephem2,aes(x=date,ymax=sunrise.day_frac*24,ymin=0),inherit.aes=F,alpha=0.5,color="blue")+
+  geom_ribbon(data=mada_ephem2,aes(x=date,ymin=sunset.day_frac*24,ymax=24),inherit.aes=F,alpha=0.5,color="blue")+
+  geom_line(data=mada_ephem2,aes(x=date,y=solarnoon.day_frac*24),inherit.aes=F,color="black",linewidth=2)+
+  ylab("hour of day")+
+  theme_bw()+theme(panel.grid.major = element_line(color = "black",linewidth = 0.25,linetype = 2))
+tide_map_short
+
+
+```
+
+
+```{r,echo=F,eval=T}
+
+low_cutoff<-(-100)
+
+ ephem_span<-length(seq.POSIXt(from=as.POSIXct("2006-01-01 00:00:00",tz="Africa/Addis_Ababa"),to=as.POSIXct("2024-12-31 23:59:00",tz="Africa/Addis_Ababa"),by="day"))
+ mada_ephem_18<-ephemeris_hms(lat=-22.6,lon=43.25,date="2006-01-01 00:00:00",span=ephem_span,tz="Africa/Addis_Ababa")
+ 
+
+
+tide_map<-ggplot() + 
+  geom_tile(data=all_tide_data_tile,aes(x=date, y=hour, fill= tide_height)) +
+  scale_fill_gradient(low="orange",high="purple",limits=c(low_cutoff,max(all_tide_data_tile$tide_height)),na.value="red",name="Tidal height (m)")+
+  scale_color_gradient(low="orange",high="purple",limits=c(low_cutoff,max(all_tide_data_tile$tide_height)),na.value="red",name="Tidal height (m)")+
+  scale_y_continuous(breaks=c(0,6,12,18,24))+
+  scale_x_datetime(date_breaks="1 year",date_labels="%Y")+
+  geom_ribbon(data=mada_ephem_18,aes(x=date,ymax=sunrise.day_frac*24,ymin=0),inherit.aes=F,alpha=0.5,color="blue")+
+  geom_ribbon(data=mada_ephem_18,aes(x=date,ymin=sunset.day_frac*24,ymax=24),inherit.aes=F,alpha=0.5,color="blue")+
+  geom_line(data=mada_ephem_18,aes(x=date,y=solarnoon.day_frac*24),inherit.aes=F,color="black",linewidth=2)+
+  ylab("hour of day")+
+  theme_bw()+theme(panel.grid.major = element_line(color = "black",linewidth = 0.25,linetype = 2))
+                   #,legend.position = "none")
+
+ggplot() + 
+  geom_tile(data=all_tide_data_tile,aes(x=hour, y=year, fill= tide_height)) +
+  scale_fill_gradient(low="orange",high="purple",limits=c(low_cutoff,max(all_tide_data_tile$tide_height)),na.value="red",name="Tidal height (m)")+
+  scale_color_gradient(low="orange",high="purple",limits=c(low_cutoff,max(all_tide_data_tile$tide_height)),na.value="red",name="Tidal height (m)")+
+  scale_x_continuous(breaks=c(0,6,12,18,24))+
+  facet_wrap(.~month)
+
+
++
+  scale_y_datetime(date_breaks="1 year",date_labels="%Y")+
+  geom_ribbon(data=mada_ephem_18,aes(x=date,ymax=sunrise.day_frac*24,ymin=0),inherit.aes=F,alpha=0.5,color="blue")+
+  geom_ribbon(data=mada_ephem_18,aes(x=date,ymin=sunset.day_frac*24,ymax=24),inherit.aes=F,alpha=0.5,color="blue")+
+  geom_line(data=mada_ephem_18,aes(x=date,y=solarnoon.day_frac*24),inherit.aes=F,color="black",linewidth=2)+
+  ylab("hour of day")+
+  theme_bw()+theme(panel.grid.major = element_line(color = "black",linewidth = 0.25,linetype = 2))+
+  facet_wrap(.~month)
+
+svg(file="figures/tide_map_18.svg",height=9,width=11)
+tide_map
+dev.off()
+
+```
+
+
+# Decadal spectral
+
+```{r,echo=F,warning=F,results='hide'}
+# Downsample to hourly resolution
+all_tide_data_tile_hourly <- all_tide_data_tile %>%
+  mutate(date = floor_date(as.POSIXct(datetime_posix), "hour")) %>%
+  group_by(date) %>%
+  summarize(tide_height = mean(tide_height, na.rm = TRUE))
+
+# Wavelet analysis
+wavelet_salary_tide <- analyze.wavelet(all_tide_data_tile_hourly, "tide_height",
+                                       loess.span = 0,
+                                       dt = 1,              # Sampling interval in hours
+                                       dj = 0.25,           # Spacing between scales
+                                       lowerPeriod = 1,     # 1-hour minimum scale
+                                       upperPeriod = 365 * 24 * 18, # 18-year maximum scale
+                                       make.pval = TRUE, 
+                                       n.sim = 25, 
+                                       date.format = "%Y-%m-%d %H:%M:%S",
+                                       verbose = FALSE)
+
+ wt.avg(wavelet_salary_tide, maximum.level = max(wavelet_salary_tide$Power.avg))
+
+
+wt.image(wavelet_salary_tide, color.key = "quantile", n.levels = 100,
+                   lvl = 4,
+                   legend.params = list(lab = "wavelet power levels", mar = 4.7),
+                   max.contour.segments = 250000,
+                   plot.contour = F,
+                   periodlab = "period (RR interval), hours", 
+                   useRaster = FALSE,
+                   plot.ridge = TRUE,
+                   date.format = "%m", 
+                   show.date = TRUE, 
+                   timelab = "Timestamp")
+```
+
