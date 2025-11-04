@@ -46,11 +46,17 @@ require(tidync)
 require(sf)
 require(cowplot)
 require(microctools)
+require(here)
+library(tmaptools)
+library(tmap)
+library(stars)
 
+#make directory to hold figures
+dir.create(here("figures"))
 
-site_data<-read.csv('site_data.csv')
-fishery_sites<-read.csv('fishing_coords.csv')
-towns<-read.csv('towns.csv')
+site_data<-read.csv(here('data/site_data.csv'))
+fishery_sites<-read.csv(here('data/fishing_coords.csv'))
+towns<-read.csv(here('data/towns.csv'))
 
 site_data$logger_start_date<-as.POSIXct(site_data$logger_start_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
 site_data$deploy_date<-as.POSIXct(site_data$deploy_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
@@ -282,11 +288,6 @@ leaflet(site_data_clean) %>%
 ```
 
 ```{r,echo=F,eval=T,warning=F,results='hide'}
-library(tmaptools)
-library(tmap)
-library(stars)
-
-
 
 lat_range <- range(site_data$latitude) + c(-0.02, 0.02)
 lon_range <- range(site_data$longitude) + c(-0.05, 0.05)
@@ -294,43 +295,55 @@ site_sf <- st_as_sf(site_data, coords = c("longitude", "latitude"), crs = 4326)
 study_area_sf<-as(extent(c(lon_range[1], lon_range[2], lat_range[1], lat_range[2])), "SpatialPolygons")
 crs(study_area_sf)<-CRS("+proj=longlat +datum=WGS84 +no_defs")
 
-#downlaod sat data
-sat <- read_osm(study_area_sf, type = "esri-imagery", zoom = 15)
-sat <- as(sat, "Raster")
-sat <- projectRaster(sat, crs = CRS("+proj=longlat +datum=WGS84 +no_defs"), method = "ngb")
-df <- na.omit(as.data.frame(sat, xy = T))
+#downlaod sat data from Copernicus Sentinel 2 (open use, CC BY)
+sat_rast <- terra::rast(here("data/mada_sentinel.tiff"))
+df <- as.data.frame(sat_rast, xy = TRUE, na.rm = TRUE)
+
+names(df) <- c("x","y","red","green","blue")
+
+#  scale to 0-255 since 32 bit
+df$red   <- scales::rescale(df$red, to = c(0, 255))
+df$green <- scales::rescale(df$green, to = c(0, 255))
+df$blue  <- scales::rescale(df$blue, to = c(0, 255))
 
 site_data$recovered<-ifelse(is.na(site_data$recovery_date),F,T)
 site_data_noair<-site_data%>%filter(!id=="SALEB10")
 
+site_data_noair_sf<-st_as_sf(site_data_noair, coords = c("longitude", "latitude"), crs = 4326)
+towns_sf<-st_as_sf(towns, coords = c("lon", "lat"), crs = 4326)
+fishery_sites_sf<-st_as_sf(na.omit(fishery_sites), coords = c("Long", "Lat"), crs = 4326)
 
-  site_data_noair_sf<-st_as_sf(site_data_noair, coords = c("longitude", "latitude"), crs = 4326)
-  towns_sf<-st_as_sf(towns, coords = c("lon", "lat"), crs = 4326)
-  fishery_sites_sf<-st_as_sf(na.omit(fishery_sites), coords = c("Long", "Lat"), crs = 4326)
-
-site_map<-ggplot() +
-geom_raster(data = df, aes(x = x, y = y), fill = rgb(df$red, df$green, df$blue, maxColorValue = 255)) +
-scale_fill_identity() +
-geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
-  geom_sf(data = towns_sf,  color = "black", shape = 22, fill = "white") +
-geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.01) +
-geom_sf(data = (site_data_noair_sf),
-        aes(fill = zone, color = recovered, size = recovered), shape = 21, stroke = 1) +
-ggrepel::geom_label_repel(
-    data = (site_data_noair_sf),aes(label = id, color=recovered,geometry = geometry),
+site_map <- ggplot() +
+  geom_raster(data = df, aes(x = x, y = y),
+              fill = rgb(df$red, df$green, df$blue, maxColorValue = 255)) +
+  geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
+  geom_sf(data = towns_sf, color = "black", shape = 22, fill = "white") +
+  geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.01) +
+  geom_sf(data = site_data_noair_sf,
+          aes(fill = zone, color = recovered, size = recovered), shape = 21, stroke = 1) +
+  ggrepel::geom_label_repel(
+    data = site_data_noair_sf,
+    aes(label = id, color = recovered, geometry = geometry),
     stat = "sf_coordinates",
     min.segment.length = 0,
-    box.padding = 0.5,xlim=c(43.27,43.32)
-  ) + 
-theme_minimal() +
-labs(x = "Longitude", y = "Latitude", fill = "Zone", color = "Recovery Status", size = "Recovery Status") +
-coord_sf(xlim = c(min(df$x), max(df$x)), ylim = c(min(df$y), max(df$y)), expand = FALSE) +
-scale_fill_manual(values = c("Lagoon" = "green", "Reef Flat" = "red", "Forereef" = "purple", "Backreef" = "blue")) +
-scale_color_manual(values = c("FALSE" = "darkgray", "TRUE" = "black")) +
-scale_size_manual(values = c("FALSE" = 1.5, "TRUE" = 3)) +
-annotation_scale( location = "br",bar_cols = c("darkgray", "white"))+
-annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_fancy_orienteering(fill= c("darkgray", "white"),line_col="darkgray"))
+    box.padding = 0.5,
+    xlim = c(43.27, 43.32)
+  ) +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude",
+       fill = "Zone", color = "Recovery Status", size = "Recovery Status") +
+  coord_sf(xlim = c(min(df$x), max(df$x)), ylim = c(min(df$y), max(df$y)), expand = FALSE) +
+  scale_fill_manual(values = c("Lagoon" = "green", "Reef Flat" = "red",
+                               "Forereef" = "purple", "Backreef" = "blue")) +
+  scale_color_manual(values = c("FALSE" = "darkgray", "TRUE" = "black")) +
+  scale_size_manual(values = c("FALSE" = 1.5, "TRUE" = 3)) +
+  annotation_scale(location = "br", bar_cols = c("darkgray", "white")) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering(fill = c("darkgray", "white"),
+                                                                line_col = "darkgray"))
+
 site_map
+
 #inset map
 
 
@@ -346,30 +359,35 @@ sstmean<-load_layers("BO_sstmean")
 
 mad.crop.sst <- raster::crop(sstmean, mad.ext)
 
-inset<-mad.crop.sst%>%
-rasterVis::gplot()+
-  geom_raster(aes(x = x, y = y,fill=value),stat='identity') +
-  scale_fill_viridis_c(option="H",na.value="transparent") +
-  coord_quickmap(expand = F)+
-  geom_sf(data=mad.st,inherit.aes=F,fill="antiquewhite")+
-   theme(legend.key.size = unit(.1, 'cm'))+
-  theme_void()+
-  labs(x = NULL, y = NULL, fill = "Mean SST (°C)")+
-  geom_point(aes(x=mean(lon_range),y=mean(lat_range)),color="black",size=2,shape=8,inherit.aes=F)+
-  annotation_scale()
-inset_leg<-get_legend(inset)
-inset_noleg<-inset_leg+
+inset <- mad.crop.sst %>%
+  rasterVis::gplot() +
+  geom_raster(aes(x = x, y = y, fill = value), stat='identity') +
+  scale_fill_viridis_c(option="H", na.value="transparent") +
+  coord_quickmap(expand = FALSE) +
+  geom_sf(data = mad.st, inherit.aes = FALSE, fill = "antiquewhite") +
+  theme_void() +
+  labs(fill = "Mean SST (°C)") +
   theme(
-      legend.position="none",
-      legend.title = element_text(color = "white"),
-      legend.text = element_text(color = "white")
-      )
+    legend.position = "right",
+    legend.title = element_text(color = "white"),
+    legend.text  = element_text(color = "white"))  
+  
 
-df<-tibble(x=43.2,y=-22.6,
-       plot=list(inset))
-aaa<-site_map+geom_plot(data=df,aes(x,y,label=plot))
 
-pdf(file="figures/sitemap_raw.pdf",height=9,width=9)
+inset_leg<-get_legend(inset)
+
+df_inset <- tibble(
+  x = 43.2,
+  y = -22.6,
+  plot = list(inset)
+)
+
+# Add inset to your main site_map
+site_map +
+  geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
+
+
+pdf(file=here("figures/sitemap_raw.pdf"),height=9,width=9)
 #plot_grid(aaa,site_map,rel_widths=c(1,.2))
 aaa
 dev.off()
@@ -385,12 +403,12 @@ dev.off()
 ```{r,echo=F,warning=F}
 
 #data readin
-eb.files<-list.files('data/logger_data')
+eb.files<-list.files(here('data/logger_data'))
 site.list<-c("saleb1_bommie","saleb10_chezFred","saleb3_rubble","saleb5_lagoon","saleb8_flat")
 site.id<-c("SALEB1","SALEB10","SALEB3","SALEB5","SALEB8")
 t.vec<-vector("list",length=length(eb.files))
 for (i in 1:length(eb.files)){
-  log<-read.csv(paste0("data/logger_data",eb.files[i]),
+  log<-read.csv(paste0(here("data/logger_data",eb.files[i])),
                 header = FALSE, skip = 35)
   
   #assign colnames 
@@ -506,13 +524,13 @@ request_era5(request = req, uid = uid, out_path = file_path,overwrite = T,combin
 
   clim_point_allair<-left_join(clim_point_air,precip_air,by='obs_time')
   
-  write.csv(clim_point_allair,'clim_point_allair.csv')
+  write.csv(clim_point_allair,here('data/clim_point_allair.csv'))
 
 ```
 
 ```{r,echo=F,warning=F}
 
-clim_point_allair<-read.csv('clim_point_allair.csv')
+clim_point_allair<-read.csv(here('data/clim_point_allair.csv'))
 
   clim_point_allair$obs_time<-as.POSIXct(clim_point_allair$obs_time,tz = "Africa/Addis_Ababa",format="%Y-%m-%d %H:%M:%S")
   clim_point_allair$id<-"era5"
@@ -567,7 +585,7 @@ air_cor<-ggplot(data = combined_data_wide,aes(x = ERA5, y = Saleb10_ChezFred,col
     geom_textabline(intercept = airmod$coefficients[1], slope = airmod$coefficients[2], label = "Linear Regression",color="blue",vjust=-1,hjust=.85)
   air_cor
 
-ggsave("figures/airtemp_correlation.png",air_cor,width=6,height=4,bg="transparent")
+ggsave(here("figures/airtemp_correlation.png"),air_cor,width=6,height=4,bg="transparent")
 ```
 
 
@@ -662,7 +680,7 @@ sat_sst<-oisst_data%>%
   mutate("id"="OISST")
 
 #####################################################################
-write.csv(sat_sst,"sat_sst.csv")
+write.csv(sat_sst,here("data/sat_sst.csv"))
 ```
 
 ```{r}
@@ -695,7 +713,7 @@ cop_mada_data<-reshaped_data%>%
 
 ```{r,echo=F,warning=F,results='hide'}
 #  OISST
-sat_sst <- read.csv("sat_sst.csv") %>%
+sat_sst <- read.csv(here("data/sat_sst.csv")) %>%
   dplyr::select(-X) %>%
   mutate(date = as.Date(date)) %>%
   rename(OISST = temp) %>%
@@ -839,7 +857,7 @@ arranged_plots_daily <- mapply(
 ) |> unlist(recursive = FALSE)
 
 ggarrange(plotlist = arranged_plots_daily, ncol = 2, nrow = 4,common.legend = T)
-ggsave("figures/sat_logger_daily_correlations_supp.png",height=9,width=6)
+ggsave(here("figures/sat_logger_daily_correlations_supp.png"),height=9,width=6)
 
 ```
 
@@ -917,7 +935,7 @@ arranged_plots <- mapply(
 ) |> unlist(recursive = FALSE)
 
 ggarrange(plotlist = arranged_plots, ncol = 2, nrow = 4,common.legend = T)
-ggsave("figures/sat_logger_hourly_correlations_supp.png",height=9,width=6)
+ggsave(here("figures/sat_logger_hourly_correlations_supp.png"),height=9,width=6)
 
 ```
 
@@ -945,7 +963,7 @@ boxplot<-ggplot(data=temp_long)+
   scale_color_manual(values=c("darkgray","black","mediumorchid", "steelblue","forestgreen"),labels=c("Copernicus SST","OISST","SALEB1 Shallow Lagoon","SALEB3 Backreef","SALEB5 Deep Lagoon")) +
     geom_vline(xintercept=c(min(water_temps_daily$date),max(water_temps_daily$date)),linetype="dotted")
 
-svg("figures/water_temps_daily.svg",width=6,height=8)
+svg(here("figures/water_temps_daily.svg"),width=6,height=8)
   
 ggarrange(boxplot,lineplot,nrow=2,labels=c("A","B"),common.legend=T,legend="right")
 
@@ -1040,7 +1058,7 @@ temp_plot_noleg<-ggplot(data=all_data_for_lineplot)+
   #gghighlight(use_direct_label = FALSE,unhighlighted_params = list(colour = NULL, alpha = c(0.3)))+
   facet_wrap(.~id)
 
-svg(file="figures/sitetempswater.svg",height=6,width=12)
+svg(file=here("figures/sitetempswater.svg"),height=6,width=12)
 plot_grid(temp_plot_noleg,violin_plot_noleg,violin_plot_leg,nrow=1,rel_widths = c(1,0.5,0.3),labels=c("A","B",""))
 dev.off()
 
@@ -1072,7 +1090,7 @@ daily_data_table<-temp_long%>%
             max=round(max(temp),2),
             days_above_30C=round(sum(temp>=30)/4,2))
 daily_data_table
-write.csv(daily_data_table,"daily_data_table.csv")
+write.csv(daily_data_table,here("data/daily_data_table.csv"))
 ```
 
 Now, let's look at quarter-hour data. We see that site differences really come out when we look at subdaily data. 
@@ -1342,10 +1360,7 @@ salary_temps_dn<-salary_temps%>%
 kruskal.test(temp ~ daynight_group,data=salary_temps_dn)
 dunn_test(temp ~ daynight_group,data=salary_temps_dn)
 
-
-
 ```
-
 
 
 And let's zoom in on a single month to get a better idea of what is going on
@@ -1438,8 +1453,8 @@ To obtain the two tide_prediction files for the years 2023 and 2024, you will ne
 ```{r,echo=F,warning=F}
 
 #plotted predictions
-mada_tide23<-read.csv('tide/tide_prediction_-22.5512N_43.2810_2023.csv')
-mada_tide24<-read.csv('tide/tide_prediction_-22.5512N_43.2810_2024.csv')
+mada_tide23<-read.csv(here('data/tide/tide_prediction_-22.5512N_43.2810_2023.csv'))
+mada_tide24<-read.csv(here('data/tide/tide_prediction_-22.5512N_43.2810_2024.csv'))
 mada_tide<-bind_rows(mada_tide23,mada_tide24)
 mada_tide$Datetime<-seq.POSIXt(from=as.POSIXct("2023-01-01 00:00:00",tz="Africa/Addis_Ababa"),
                                to=as.POSIXct("2024-12-31 23:59:00",tz="Africa/Addis_Ababa"),by="1 min")+lubridate::hours(3) # Toliara is +3 UTC
@@ -1559,7 +1574,7 @@ We can actually get decently close predictions of logger height by manually extr
 
 ```{r,echo=F,warning=F}
 
-tide_height<-read.csv('tide_height_table.csv')
+tide_height<-read.csv(here('data/tide_height_table.csv'))
 
 max_hour<-6
 interval_minute<-1
@@ -1600,7 +1615,7 @@ split_tide<-ggplot(data = a$temp_data, aes(x = datetime, y = temp, color = statu
   scale_x_datetime(date_breaks = "1 months", date_labels = "%b %Y") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-ggsave("figures/saleb8_flat_tide_status.svg", width = 6, height = 4, bg="transparent")
+ggsave(here("figures/saleb8_flat_tide_status.svg"), width = 6, height = 4, bg="transparent")
 
 
 ```
@@ -1708,8 +1723,9 @@ lower_part<-plot_grid(ncol=2,nrow=2, lagoon_flat,sunnight_lagoon_flat, air_flat,
 
 plot_grid(split_tide,lower_part,labels=c("A",""),nrow=2,ncol=1,align="hv",heights=c(1,5))
 
-ggsave("figures/residuals_flat.png", width = 8, height = 8, bg="white")
+ggsave(here("figures/residuals_flat.png"), width = 8, height = 8, bg="white")
 ```
+
 We can look at the frequency of of exposure-hours given a -100cm elevation. 
 
 ```{r,echo=F,warning=F}
@@ -1756,7 +1772,7 @@ summary_stats <- periods %>%
 
 summary_stats
 
-svg("figures/emersion_freq.svg",width=4,height=4)
+svg(here("figures/emersion_freq.svg"),width=4,height=4)
 ggplot(periods, aes(x = duration_hrs)) +
   geom_histogram(binwidth = 0.25, fill = "steelblue", color = "black") +
   labs(x = "Duration (hours)",
@@ -1783,7 +1799,7 @@ Here, I look at the spectral behavior of the temperature logger data to parse ou
 
 
 
-png("figures/wavelet_salary_flat.png", width = 8, height = 6,bg="white", units="in",res=300) 
+png(here("figures/wavelet_salary_flat.png"), width = 8, height = 6,bg="white", units="in",res=300) 
 
 layout(matrix(c(1, 2), nrow = 1), widths = c(2, 1))
 
@@ -1881,7 +1897,7 @@ Next, SALEB1, 3, 5, and 10
 
 ```{r,echo=F,warning=F}
 #2x 
-png("figures/wavelet_supp.png", width = 12, height = 12,bg="white",units="in",res=300)  
+png(here("figures/wavelet_supp.png"), width = 12, height = 12,bg="white",units="in",res=300)  
 layout(matrix(1:8, ncol = 2, byrow = TRUE), widths = c(2, 1))
 
 # Outer margins (bottom, left, top, right)
@@ -2074,15 +2090,15 @@ coherency_saleb_1_8 <- analyze.coherency(saleb_1_8, my.pair = c("saleb1_bommie",
 make.pval = TRUE, n.sim = 25, date.format = "%m",verbose=F,
 window.size.t=5,window.size.s=5/4)
 
-saveRDS(coherency_saleb_1_5,"data/coherency_saleb_1_5.rds")
+saveRDS(coherency_saleb_1_5,here("data/coherency_saleb_1_5.rds"))
 
-saveRDS(coherency_saleb_1_8,"data/coherency_saleb_1_8.rds")
+saveRDS(coherency_saleb_1_8,here("data/coherency_saleb_1_8.rds"))
 ```
 
 ```{r,echo=F,warning=F}
 
-coherency_saleb_1_5<-readRDS("data/coherency_saleb_1_5.rds")
-coherency_saleb_1_8<-readRDS("data/coherency_saleb_1_8.rds")
+coherency_saleb_1_5<-readRDS(here("data/coherency_saleb_1_5.rds"))
+coherency_saleb_1_8<-readRDS(here("data/coherency_saleb_1_8.rds"))
 
 wc.image(coherency_saleb_1_5, n.levels = 100,
  legend.params = list(lab = "cross-wavelet power levels, saleb 1 and 5"),
@@ -2156,7 +2172,7 @@ all_tide_data_b<-bind_rows(all_tide_data)
 
 
  
-write.csv(all_tide_data_b,"all_tide_data_18.csv")
+write.csv(all_tide_data_b,here("data/all_tide_data_18.csv"))
 
 ```
 
@@ -2169,7 +2185,7 @@ all_tide_data$datetime_posix<-as.POSIXct(all_tide_data$datetime_posix,format="%Y
          month = month(datetime, label = TRUE))%>%
    group_by(year,month)%>%
   summarize(hours = sum(tide_height < -100, na.rm = TRUE) / 60, .groups = "drop")
- write.csv(hours_100,"hours_100.csv")
+ write.csv(hours_100,here("data/hours_100.csv"))
 
 
  min_ht_months<-all_tide_data%>%
@@ -2177,14 +2193,14 @@ all_tide_data$datetime_posix<-as.POSIXct(all_tide_data$datetime_posix,format="%Y
          month = month(datetime, label = TRUE))%>%
    group_by(year,month)%>%
     summarize(min = min(tide_height))
- write.csv(min_ht_months,"min_ht_months.csv")
+ write.csv(min_ht_months,here("data/min_ht_months.csv"))
  
 hours_100_daynight<-all_tide_data%>%
   mutate(year = year(datetime), 
          month = month(datetime, label = TRUE))%>%
    group_by(year,month,day_night)%>%
   summarize(hours = sum(tide_height < -100, na.rm = TRUE) / 60, .groups = "drop")
-write.csv(hours_100_daynight,"hours_100_daynight.csv")
+write.csv(hours_100_daynight,here("data/hours_100_daynight.csv"))
 
 
  min_ht_months_daynight<-all_tide_data%>%
@@ -2192,7 +2208,7 @@ write.csv(hours_100_daynight,"hours_100_daynight.csv")
          month = month(datetime, label = TRUE))%>%
    group_by(year,month,day_night)%>%
     summarize(min = min(tide_height))
- write.csv(min_ht_months_daynight,"min_ht_months_daynight.csv")
+ write.csv(min_ht_months_daynight,here("data/min_ht_months_daynight.csv"))
  
  rm(all_tide_data)
 ```
@@ -2221,21 +2237,22 @@ names(month_colors) <- factor(ranked_months$month,levels = c("Jan", "Feb", "Mar"
 
 
 
-hours_100<-read.csv("hours_100.csv")
+hours_100<-read.csv(here("data/hours_100.csv"))
 hours_100$month <- factor(hours_100$month, 
                                    levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
 
-min_ht_months<-read.csv("min_ht_months.csv")
+min_ht_months<-read.csv(here("data/min_ht_months.csv"))
 min_ht_months$month <- factor(min_ht_months$month, 
                                    levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
-hours_100_daynight<-read.csv("hours_100_daynight.csv")
+
+hours_100_daynight<-read.csv(here("data/hours_100_daynight.csv"))
 hours_100_daynight$month <- factor(hours_100_daynight$month, 
                                    levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
 
-min_ht_months_daynight<-read.csv("min_ht_months_daynight.csv")
+min_ht_months_daynight<-read.csv(here("data/min_ht_months_daynight.csv"))
 min_ht_months_daynight$month <- factor(min_ht_months_daynight$month, 
                                    levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
@@ -2309,7 +2326,7 @@ hours_below_season<-ggplot()+
   geom_smooth(data=hours_100_daynight,aes(x=year,y=hours,color=season,group=interaction(season,day_night),linetype=day_night),method='gam')+
   scale_color_manual(values=season_colors) 
 hours_below_season
-ggsave("figures/hours_below_season.svg",
+ggsave(here("figures/hours_below_season.svg"),
        width = 6, height = 4, units = "in", dpi = 300)
 
 ggplot()+
@@ -2361,7 +2378,7 @@ min_ht_months_daynight <- min_ht_months_daynight %>%
 minimum_height_daymonth<-ggplot(data=min_ht_months_daynight,aes(x=year,y=min/100,linetype=day_night,color=month,group=interaction(month,day_night)))+facet_wrap(.~month)+geom_line()+labs(x="Year",y="Minimum Tide Height (m)",color="Month",linetype="Time of Day")+theme_linedraw()+scale_color_manual(values=month_colors)+theme(axis.text.x=element_text(angle=45))
 
 ggarrange(hours_100_monthdaynight,minimum_height_daymonth,common.legend=T,legend="right",labels=c("A","B"),nrow=2)
-ggsave("figures/month_exposure_comparison.svg",
+ggsave(here("figures/month_exposure_comparison.svg"),
        width = 6, height = 9, units = "in", dpi = 300)
 ```
 Once again, seasons clarify things for us. Daytime monthly minimum tide height is not very different spring v. fall, but it is very different at night. 
@@ -2395,7 +2412,7 @@ min_tide_height_years
 
 ggarrange(hours_below_season,min_tide_height_years,common.legend=T,legend="right",labels=c("A","B"),nrow=2)
 
-ggsave("figures/season_exposure_comparison.svg",
+ggsave(here("figures/season_exposure_comparison.svg"),
        width = 6, height = 8, units = "in", dpi = 300)
 ```
 
@@ -2481,7 +2498,7 @@ Does the daily minimum always occur during midday?
 ```{r,echo=F,warning=F}
 
 
-all_tide_data<-read.csv("all_tide_data_18.csv")
+all_tide_data<-read.csv(here("data/all_tide_data_18.csv"))
 
 all_tide_data$datetime_posix<-as.POSIXct(all_tide_data$datetime_posix,format="%Y-%m-%d %H:%M:%S",tz="Africa/Addis_Ababa")+lubridate::hours(3)
 
