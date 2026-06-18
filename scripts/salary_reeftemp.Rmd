@@ -19,6 +19,7 @@ require(viridis)
 require(ggpmisc)
 require(ggrepel)
 require(gghighlight)
+require(tidyterra)
 require(kableExtra)
 require(emmeans)
 require(mcera5,attach.required=T)
@@ -47,9 +48,9 @@ require(sf)
 require(cowplot)
 require(microctools)
 require(here)
-library(tmaptools)
-library(tmap)
-library(stars)
+require(tmaptools)
+require(tmap)
+require(stars)
 
 #make directory to hold figures
 dir.create(here("figures"))
@@ -57,6 +58,12 @@ dir.create(here("figures"))
 site_data<-read.csv(here('data/site_data.csv'))
 fishery_sites<-read.csv(here('data/fishing_coords.csv'))
 towns<-read.csv(here('data/towns.csv'))
+#fishing zone shapefiles
+fishing_zones<-st_read(here('data/fishing_site_spatial/Salary_Fishing_Sites_CPUE_March_2026.shp'))
+#relevel some zones
+fishing_zones <- fishing_zones %>%
+  mutate(Reef_zone = forcats::fct_recode(Reef_zone, 
+                                "Reef Flat" = "Inshore", "Backreef" = "Reef crest"))
 
 site_data$logger_start_date<-as.POSIXct(site_data$logger_start_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
 site_data$deploy_date<-as.POSIXct(site_data$deploy_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
@@ -316,18 +323,19 @@ fishery_sites_sf<-st_as_sf(na.omit(fishery_sites), coords = c("Long", "Lat"), cr
 site_map <- ggplot() +
   geom_raster(data = df, aes(x = x, y = y),
               fill = rgb(df$red, df$green, df$blue, maxColorValue = 255)) +
-  geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
+      geom_spatvector(data = fishing_zones, aes(fill = Reef_zone),alpha=0.4) +
+  #geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
   geom_sf(data = towns_sf, color = "black", shape = 22, fill = "white") +
   geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.01) +
   geom_sf(data = site_data_noair_sf,
           aes(fill = zone, color = recovered, size = recovered), shape = 21, stroke = 1) +
   ggrepel::geom_label_repel(
-    data = site_data_noair_sf,
+    data = site_data_noair_sf%>%dplyr::filter(recovered=="TRUE"),
     aes(label = id, color = recovered, geometry = geometry),
     stat = "sf_coordinates",
     min.segment.length = 0,
     box.padding = 0.5,
-    xlim = c(43.27, 43.32)
+    xlim = c(43.2, 43.32)
   ) +
   theme_minimal() +
   labs(x = "Longitude", y = "Latitude",
