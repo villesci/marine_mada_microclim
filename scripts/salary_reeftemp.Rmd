@@ -22,19 +22,16 @@ require(gghighlight)
 require(tidyterra)
 require(kableExtra)
 require(emmeans)
-require(mcera5,attach.required=T)
 require(zoo)
 require(MetBrewer)
 require(ggsignif)
 require(sdmpredictors)
-library(ggspatial)
-library(raster)
+require(ggspatial)
+require(raster)
 require(mapdata)
 require(ecmwfr)
-require(microclima)
-require(maptools)
+#require(maptools)
 require(rerddap)
-require(NicheMapR)
 require(devtools)
 require(WaveletComp)
 require(ncdf4)
@@ -46,7 +43,6 @@ require(lubridate)
 require(tidync)
 require(sf)
 require(cowplot)
-require(microctools)
 require(here)
 require(tmaptools)
 require(tmap)
@@ -63,7 +59,13 @@ fishing_zones<-st_read(here('data/fishing_site_spatial/Salary_Fishing_Sites_CPUE
 #relevel some zones
 fishing_zones <- fishing_zones %>%
   mutate(Reef_zone = forcats::fct_recode(Reef_zone, 
-                                "Reef Flat" = "Inshore", "Backreef" = "Reef crest"))
+                                "Reef Flat" = "Inshore", "Reef Crest" = "Reef crest"))
+
+reef_colors <- c("Lagoon" = "darkgreen", "Reef Flat" = "darkorange",
+                               "Forereef" = "maroon1", "Backreef" = "steelblue","Reef Crest"="firebrick")
+
+logger_colors <-  c("SALEB1 Shallow Lagoon" = "mediumorchid", "SALEB3 Backreef" = "steelblue", "SALEB5 Deep Lagoon" = "forestgreen", "SALEB8 Reef Flat" = "darkorange")
+
 
 site_data$logger_start_date<-as.POSIXct(site_data$logger_start_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
 site_data$deploy_date<-as.POSIXct(site_data$deploy_date,format="%m/%d/%Y %H:%M",tz="Africa/Addis_Ababa")
@@ -323,15 +325,19 @@ fishery_sites_sf<-st_as_sf(na.omit(fishery_sites), coords = c("Long", "Lat"), cr
 site_map <- ggplot() +
   geom_raster(data = df, aes(x = x, y = y),
               fill = rgb(df$red, df$green, df$blue, maxColorValue = 255)) +
-      geom_spatvector(data = fishing_zones, aes(fill = Reef_zone),alpha=0.4) +
+      geom_spatvector(data = fishing_zones, aes(fill = Reef_zone),alpha=0.7) +
   #geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
   geom_sf(data = towns_sf, color = "black", shape = 22, fill = "white") +
   geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.01) +
-  geom_sf(data = site_data_noair_sf,
-          aes(fill = zone, color = recovered, size = recovered), shape = 21, stroke = 1) +
+  geom_sf(data = site_data_noair_sf%>%dplyr::filter(recovered=="TRUE"),
+          aes(fill = zone), 
+              #color = recovered, size = recovered),
+          shape = 21, stroke = 1,size=3) +
   ggrepel::geom_label_repel(
     data = site_data_noair_sf%>%dplyr::filter(recovered=="TRUE"),
-    aes(label = id, color = recovered, geometry = geometry),
+    aes(label = id, 
+        #color = recovered, 
+        geometry = geometry),
     stat = "sf_coordinates",
     min.segment.length = 0,
     box.padding = 0.5,
@@ -339,10 +345,11 @@ site_map <- ggplot() +
   ) +
   theme_minimal() +
   labs(x = "Longitude", y = "Latitude",
-       fill = "Zone", color = "Recovery Status", size = "Recovery Status") +
+       fill = "Geomorphic\nZone", 
+       #color = "Recovery Status", size = "Recovery Status") +
+  ) +
   coord_sf(xlim = c(min(df$x), max(df$x)), ylim = c(min(df$y), max(df$y)), expand = FALSE) +
-  scale_fill_manual(values = c("Lagoon" = "green", "Reef Flat" = "red",
-                               "Forereef" = "purple", "Backreef" = "blue")) +
+  scale_fill_manual(values = reef_colors) +
   scale_color_manual(values = c("FALSE" = "darkgray", "TRUE" = "black")) +
   scale_size_manual(values = c("FALSE" = 1.5, "TRUE" = 3)) +
   annotation_scale(location = "br", bar_cols = c("darkgray", "white")) +
@@ -358,29 +365,41 @@ site_map
 #shapefile of MAd
 MAD <- maps::map("worldHires", c("Madagascar"),fill=T,plot=F)
 #put shpaefule into spatial polygons
-mad.sp<-map2SpatialPolygons(MAD,IDs = MAD$names,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
-mad.ext <- raster::extent(42.143555,50.976563,-26.588527,-11.070603)
-mat.sp.crop<-raster::crop(mad.sp,mad.ext)
-mad.st<-sf::st_as_sf(mat.sp.crop)
-#load all sst data
+mad.sp<-st_as_sf(MAD,IDs = MAD$names,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+mad.ext <- terra::ext(42.143555,50.976563,-26.588527,-11.070603)
+#mat.sp.crop<-terra::crop(mad.sp,mad.ext)
+mad.st <- sf::st_crop(mad.sp, 
+                      xmin = 42.143555, xmax = 50.976563, 
+                      ymin = -26.588527, ymax = -11.070603)#load all sst data
 sstmean<-load_layers("BO_sstmean")
 
-mad.crop.sst <- raster::crop(sstmean, mad.ext)
+mad.crop.sst <- terra::crop(terra::rast(sstmean), mad.ext)
 
-inset <- mad.crop.sst %>%
-  rasterVis::gplot() +
-  geom_raster(aes(x = x, y = y, fill = value), stat='identity') +
-  scale_fill_viridis_c(option="H", na.value="transparent") +
-  coord_quickmap(expand = FALSE) +
-  geom_sf(data = mad.st, inherit.aes = FALSE, fill = "antiquewhite") +
-  theme_void() +
-  labs(fill = "Mean SST (°C)") +
-  theme(
+
+  
+inset<-mad.crop.sst%>%
+rasterVis::gplot()+
+  geom_raster(aes(x = x, y = y,fill=value),stat='identity') +
+  scale_fill_viridis_c(option="H",na.value="transparent") +
+  coord_quickmap(expand = F)+
+  geom_sf(data=mad.st,inherit.aes=F,fill="antiquewhite")+
+   theme(legend.key.size = unit(.1, 'cm'))+
+  theme_void()+
+  labs(x = NULL, y = NULL, fill = "Mean SST (°C)")+
+  geom_point(aes(x=mean(lon_range),y=mean(lat_range)),color="black",size=2,shape=8,inherit.aes=F)+
+  annotation_scale(text_col="white") +
+    theme(
     legend.position = "right",
     legend.title = element_text(color = "white"),
     legend.text  = element_text(color = "white"))  
-  
 
+inset_leg<-get_legend(inset)
+inset_noleg<-inset_leg+
+  theme(
+      legend.position="none",
+      legend.title = element_text(color = "white"),
+      legend.text = element_text(color = "white")
+      )
 
 inset_leg<-get_legend(inset)
 
@@ -395,12 +414,17 @@ site_map +
   geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
 
 
-pdf(file=here("figures/sitemap_raw.pdf"),height=9,width=9)
+svg(file=here("figures/sitemap_raw.svg"),height=6,width=9)
 #plot_grid(aaa,site_map,rel_widths=c(1,.2))
-aaa
+site_map +
+  geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
 dev.off()
 
-
+png(file=here("figures/sitemap_raw.png"),res=300,units="in",height=6,width=9)
+#plot_grid(aaa,site_map,rel_widths=c(1,.2))
+site_map +
+  geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
+dev.off()
 
 
 ```
@@ -1824,7 +1848,7 @@ wt.image(wavelet_salary_flat, color.key = "quantile", n.levels = 100,
                    show.date = TRUE, 
                    timelab = "",
          graphics.reset=F,
-         siglvl=0.01)
+         siglvl=c(0.01,0.05))
   abline(h = log(8)/log(2),lty=3,lwd=2)
   abline(h = log(12.4)/log(2),lty=3,lwd=2)
   abline(h = log(24)/log(2),lty=3,lwd=2)
