@@ -47,6 +47,8 @@ require(here)
 require(tmaptools)
 require(tmap)
 require(stars)
+require(rstatix)
+require(geomtextpath)
 
 #make directory to hold figures
 dir.create(here("figures"))
@@ -59,10 +61,14 @@ fishing_zones<-st_read(here('data/fishing_site_spatial/Salary_Fishing_Sites_CPUE
 #relevel some zones
 fishing_zones <- fishing_zones %>%
   mutate(Reef_zone = forcats::fct_recode(Reef_zone, 
-                                "Reef Flat" = "Inshore", "Reef Crest" = "Reef crest"))
+                                "Reef Flat" = "Inshore", "Reef Crest" = "Reef crest"))%>%
+  mutate(Reef_zone = forcats::fct_relevel(Reef_zone, "Forereef", "Reef Crest", "Backreef", "Lagoon", "Reef Flat"))
 
-reef_colors <- c("Lagoon" = "darkgreen", "Reef Flat" = "darkorange",
-                               "Forereef" = "maroon1", "Backreef" = "steelblue","Reef Crest"="firebrick")
+#and for the sites as well
+site_data <- site_data %>%
+  mutate(zone = forcats::fct_relevel(zone, "Forereef", "Reef Crest", "Backreef", "Lagoon", "Reef Flat"))
+
+reef_colors <- c("Forereef" = "maroon1","Reef Crest"="firebrick", "Backreef" = "steelblue","Lagoon" = "darkgreen", "Reef Flat" = "darkorange")
 
 logger_colors <-  c("SALEB1 Shallow Lagoon" = "mediumorchid", "SALEB3 Backreef" = "steelblue", "SALEB5 Deep Lagoon" = "forestgreen", "SALEB8 Reef Flat" = "darkorange")
 
@@ -304,16 +310,18 @@ site_sf <- st_as_sf(site_data, coords = c("longitude", "latitude"), crs = 4326)
 study_area_sf<-as(extent(c(lon_range[1], lon_range[2], lat_range[1], lat_range[2])), "SpatialPolygons")
 crs(study_area_sf)<-CRS("+proj=longlat +datum=WGS84 +no_defs")
 
-#downlaod sat data from Copernicus Sentinel 2 (open use, CC BY)
-sat_rast <- terra::rast(here("data/mada_sentinel.tiff"))
-df <- as.data.frame(sat_rast, xy = TRUE, na.rm = TRUE)
 
-names(df) <- c("x","y","red","green","blue")
+#downlaod sat data from Copernicus Sentinel 2 (open use, CC BY) - date of image 2025-07-19
+sat_rast_full <- terra::rast(here("data/mada_sentinel_full.tiff"))
+df_full <- as.data.frame(sat_rast_full, xy = TRUE, na.rm = TRUE)
+
+names(df_full) <- c("x","y","red","green","blue")
 
 #  scale to 0-255 since 32 bit
-df$red   <- scales::rescale(df$red, to = c(0, 255))
-df$green <- scales::rescale(df$green, to = c(0, 255))
-df$blue  <- scales::rescale(df$blue, to = c(0, 255))
+df_full$red   <- scales::rescale(df_full$red, to = c(0, 255))
+df_full$green <- scales::rescale(df_full$green, to = c(0, 255))
+df_full$blue  <- scales::rescale(df_full$blue, to = c(0, 255))
+
 
 site_data$recovered<-ifelse(is.na(site_data$recovery_date),F,T)
 site_data_noair<-site_data%>%filter(!id=="SALEB10")
@@ -322,44 +330,66 @@ site_data_noair_sf<-st_as_sf(site_data_noair, coords = c("longitude", "latitude"
 towns_sf<-st_as_sf(towns, coords = c("lon", "lat"), crs = 4326)
 fishery_sites_sf<-st_as_sf(na.omit(fishery_sites), coords = c("Long", "Lat"), crs = 4326)
 
+legend_key <- data.frame(
+  x = NA_real_, y = NA_real_,
+  type = factor(c("Logger", "Fishing Zone"), levels = c("Logger", "Fishing Zone"))
+)
+
 site_map <- ggplot() +
-  geom_raster(data = df, aes(x = x, y = y),
-              fill = rgb(df$red, df$green, df$blue, maxColorValue = 255)) +
-      geom_spatvector(data = fishing_zones, aes(fill = Reef_zone),alpha=0.7) +
-  #geom_sf_text(data = fishery_sites_sf, aes(label = Nom.du.site), color = "white") +
-  geom_sf(data = towns_sf, color = "black", shape = 22, fill = "white") +
-  geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.01) +
-  geom_sf(data = site_data_noair_sf%>%dplyr::filter(recovered=="TRUE"),
+  geom_raster(data = df_full, aes(x = x, y = y),
+              fill = rgb(df_full$red, df_full$green, df_full$blue, maxColorValue = 255)) +
+  
+  geom_spatvector(data = fishing_zones, aes(fill = Reef_zone), alpha = 0.7, color = "black", lwd = .5) +
+  
+  #geom_sf(data = towns_sf, color = "black", shape = 22, fill = "white",size=1) +
+  #geom_sf_text(data = towns_sf, aes(label = town), color = "white", nudge_x = 0.02) +
+  
+  geom_sf(data = site_data_noair_sf %>% dplyr::filter(recovered == "TRUE"),
           aes(fill = zone), 
-              #color = recovered, size = recovered),
-          shape = 21, stroke = 1,size=3) +
+          shape = 24, stroke = .75, size = 2, show.legend = TRUE, color = "white") +
   ggrepel::geom_label_repel(
-    data = site_data_noair_sf%>%dplyr::filter(recovered=="TRUE"),
-    aes(label = id, 
-        #color = recovered, 
-        geometry = geometry),
+    data = site_data_noair_sf %>% dplyr::filter(recovered == "TRUE"),
+    aes(label = id, geometry = geometry,fill=zone),
     stat = "sf_coordinates",
     min.segment.length = 0,
-    box.padding = 0.5,
-    xlim = c(43.2, 43.32)
+    box.padding = .9,
+    color="white",
+    #fill="black",
+    alpha=0.75,
+    xlim = c(43.2, 43.32),
+    show.legend = F
   ) +
   theme_minimal() +
-  labs(x = "Longitude", y = "Latitude",
-       fill = "Geomorphic\nZone", 
-       #color = "Recovery Status", size = "Recovery Status") +
+  labs(
+    x = "Longitude", y = "Latitude",
+    fill = "Reef\nZone"
   ) +
-  coord_sf(xlim = c(min(df$x), max(df$x)), ylim = c(min(df$y), max(df$y)), expand = FALSE) +
-  scale_fill_manual(values = reef_colors) +
-  scale_color_manual(values = c("FALSE" = "darkgray", "TRUE" = "black")) +
-  scale_size_manual(values = c("FALSE" = 1.5, "TRUE" = 3)) +
-  annotation_scale(location = "br", bar_cols = c("darkgray", "white")) +
+  coord_sf(xlim = c(min(df_full$x), max(df_full$x)),
+           ylim = c(min(df_full$y), max(df_full$y)),
+           expand = FALSE) +
+  
+  scale_fill_manual(
+    values = reef_colors, 
+    breaks = c("Forereef", "Reef Crest", "Backreef", "Lagoon", "Reef Flat"), 
+    drop = FALSE,
+    guide = guide_legend(
+      override.aes = list(
+        shape = c(NA, NA, 24, 24, 24), 
+        color = c("black", "black", "black", "black", "black"),
+        fill = reef_colors
+      )
+    )
+  ) +
+  annotation_scale(location = "br", bar_cols = c("darkgray", "white"), text_col = "white") +
   annotation_north_arrow(location = "tr", which_north = "true",
                          style = north_arrow_fancy_orienteering(fill = c("darkgray", "white"),
-                                                                line_col = "darkgray"))
+                                                                line_col = "black",
+                                                                text_col = "white"))
 
 site_map
 
-#inset map
+
+##inset map
 
 
 #shapefile of MAd
@@ -377,56 +407,125 @@ mad.crop.sst <- terra::crop(terra::rast(sstmean), mad.ext)
 
 
   
-inset<-mad.crop.sst%>%
-rasterVis::gplot()+
-  geom_raster(aes(x = x, y = y,fill=value),stat='identity') +
-  scale_fill_viridis_c(option="H",na.value="transparent") +
-  coord_quickmap(expand = F)+
-  geom_sf(data=mad.st,inherit.aes=F,fill="antiquewhite")+
-   theme(legend.key.size = unit(.1, 'cm'))+
-  theme_void()+
-  labs(x = NULL, y = NULL, fill = "Mean SST (°C)")+
-  geom_point(aes(x=mean(lon_range),y=mean(lat_range)),color="black",size=2,shape=8,inherit.aes=F)+
-  annotation_scale(text_col="white") +
-    theme(
-    legend.position = "right",
-    legend.title = element_text(color = "white"),
-    legend.text  = element_text(color = "white"))  
-
-inset_leg<-get_legend(inset)
-inset_noleg<-inset_leg+
+inset <- mad.crop.sst %>%
+  rasterVis::gplot() +
+  geom_raster(aes(x = x, y = y, fill = value), stat = 'identity') +
+  scale_fill_viridis_c(option = "H", na.value = "transparent") +
+  coord_quickmap(expand = FALSE) +
+  geom_sf(data = mad.st, inherit.aes = FALSE, fill = "antiquewhite") +
+  theme_void() +
+  labs(x = NULL, y = NULL, fill = "Mean SST\n(°C)") +
+  geom_point(aes(x = mean(lon_range), y = mean(lat_range)), color = "black", size = 2, shape = 8, inherit.aes = FALSE) +
+  #annotation_scale(text_col = "white") +
   theme(
-      legend.position="none",
-      legend.title = element_text(color = "white"),
-      legend.text = element_text(color = "white")
-      )
-
-inset_leg<-get_legend(inset)
+    legend.position = "right",                                
+    legend.key.size = unit(0.3, 'cm'),                        
+    legend.title = element_text(color = "white", size = 8),   
+    legend.text  = element_text(color = "white", size = 7)
+  )
 
 df_inset <- tibble(
-  x = 43.2,
-  y = -22.6,
-  plot = list(inset)
+  x = 43.21,
+  y = -22.61,
+  plot = list(inset) 
 )
 
-# Add inset to your main site_map
 site_map +
-  geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
-
+  geom_plot(
+    data = df_inset, 
+    aes(x = x, y = y, label = plot),
+    vp.width = 0.45,   
+    vp.height = 0.35,  
+    hjust = 0,         
+    vjust = 1          
+  )
 
 svg(file=here("figures/sitemap_raw.svg"),height=6,width=9)
 #plot_grid(aaa,site_map,rel_widths=c(1,.2))
 site_map +
-  geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
+  geom_plot(
+    data = df_inset, 
+    aes(x = x, y = y, label = plot),
+    vp.width = 0.45,   
+    vp.height = 0.35,  
+    hjust = 0,         
+    vjust = 1          
+  )
 dev.off()
 
 png(file=here("figures/sitemap_raw.png"),res=300,units="in",height=6,width=9)
 #plot_grid(aaa,site_map,rel_widths=c(1,.2))
 site_map +
-  geom_plot(data = df_inset, aes(x = x, y = y, label = plot))
+  geom_plot(
+    data = df_inset, 
+    aes(x = x, y = y, label = plot),
+    vp.width = 0.45,   # Expanded from .3 to .45 to give the right-aligned legend room to draw
+    vp.height = 0.35,  # Height allocation for the inset square
+    hjust = 0,         # Left-aligns container on your 'x' coordinate
+    vjust = 1          # Top-aligns container on your 'y' coordinate
+  )
+
 dev.off()
 
 
+#map of all fishery sites used to analyze fisheries catch
+
+
+site_map_allsites <- ggplot() +
+  geom_raster(data = df_full, aes(x = x, y = y),
+              fill = rgb(df_full$red, df_full$green, df_full$blue, maxColorValue = 255)) +
+  
+  geom_spatvector(data = fishing_zones, aes(fill = Reef_zone), alpha = 0.7, color = "black", lwd = .5) +
+  geom_sf(data = site_data_noair_sf,
+          aes(fill = zone,
+              color = recovered, size = recovered),
+          shape = 21, stroke = 1, size = 3, show.legend = TRUE) +
+  ggrepel::geom_label_repel(
+    data = site_data_noair_sf ,
+    aes(label = id, geometry = geometry,color = recovered),
+    stat = "sf_coordinates",
+    min.segment.length = 0,
+    box.padding = 0.5,
+    xlim = c(43.2, 43.32),
+    alpha=0.9
+  ) +
+  
+  theme_minimal() +
+  labs(
+    x = "Longitude", y = "Latitude",
+    fill = "Reef\nZone",color = "Recovery Status", size = "Recovery Status") +
+  scale_fill_manual(
+    values = reef_colors, 
+    breaks = c("Forereef", "Reef Crest", "Backreef", "Lagoon", "Reef Flat"), 
+    drop = FALSE,
+    guide = guide_legend(
+      override.aes = list(
+        shape = c(21, NA, 21, 21, 21), 
+        color = c("darkgray", "black", "black", "black", "black"),
+        fill = reef_colors
+      )
+    )
+  ) +  
+  scale_color_manual(values = c("FALSE" = "darkgray", "TRUE" = "black"), drop = FALSE) +
+  annotation_scale(location = "br", bar_cols = c("darkgray", "white")) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering(fill = c("darkgray", "white"),
+                                                                line_col = "darkgray",
+                                                                text_col = "black"))
+  
+
+site_map_allsites
+
+
+svg(file=here("figures/sitemap_full.svg"),height=9,width=6)
+#plot_grid(aaa,site_map,rel_widths=c(1,.2))
+site_map_allsites
+dev.off()
+
+png(file=here("figures/sitemap_full.png"),res=300,units="in",height=9,width=6)
+#plot_grid(aaa,site_map,rel_widths=c(1,.2))
+site_map_allsites
+dev.off()
 ```
 
 
@@ -720,7 +819,7 @@ write.csv(sat_sst,here("data/sat_sst.csv"))
 #| echo: false
 
 #copernicus sst data GLOBAL_ANALYSISFORECAST_PHY_001_024 from 0.49m depth
-cop_mada<-terra::rast("data/cop_sst.nc")
+cop_mada<-terra::rast(here("data/cop_sst.nc"))
 cop_mada_ext<-terra::extract(cop_mada,y=cbind(43.25,-22.6),method="simple")
 datetime<-terra::time(cop_mada)
 
@@ -1111,7 +1210,33 @@ temp_long$id<-as.factor(temp_long$id)
 #not signficant
 kruskal.test(temp ~ id,data=temp_long)
 
-dunn_test(temp_long, temp ~ id,p.adjust.method="bonferroni")
+posthoc_daily<-dunn_test(temp_long, temp ~ id,p.adjust.method="bonferroni")
+
+posthoc_daily <- posthoc_daily%>%
+  rename("Logger 1" = group1,
+         "Logger 2" = group2,
+         "n1" = n1,
+         "n2" = n2,
+         "Z Statistic" = statistic,
+         "P-value" = p,
+         "Adjusted P-value" = p.adj)
+
+posthoc_daily <- posthoc_daily %>%
+  mutate(
+    `P-value` = case_when(
+      `P-value` < 0.0001 ~ "<0.0001",
+      TRUE ~ as.character(round(`P-value`, 4))
+    ),
+    `Adjusted P-value` = case_when(
+      `Adjusted P-value` < 0.0001 ~ "<0.0001",
+      TRUE ~ as.character(round(`Adjusted P-value`, 4))
+    )
+  )
+
+# View the result
+posthoc_daily
+posthoc_daily <- signif_df(posthoc_daily,3)
+
 
 
 daily_data_table<-temp_long%>%
@@ -1131,8 +1256,41 @@ Now, let's look at quarter-hour data. We see that site differences really come o
 ```{r,echo=F,warning=F}
 
 kruskal.test(temp ~ id,data=water_temps)
-dunn_test(temp ~ id,data=water_temps)
 
+posthoc_watertemps<-dunn_test(temp ~ id,data=water_temps)
+
+posthoc_watertemps_nice<-kable(posthoc_watertemps[,-c(1,9)], digits=4,col.names = c("Logger 1","Logger 2","n1","n2","<i>Z</i> Statistic","P-value","Adjusted P-value"))
+posthoc_watertemps_nice
+
+#rename columns
+posthoc_watertemps <- posthoc_watertemps %>%
+  rename("Logger 1" = group1,
+         "Logger 2" = group2,
+         "n1" = n1,
+         "n2" = n2,
+         "Z Statistic" = statistic,
+         "P-value" = p,
+         "Adjusted P-value" = p.adj)
+
+posthoc_watertemps <- posthoc_watertemps %>%
+  mutate(
+    `P-value` = case_when(
+      `P-value` < 0.0001 ~ "<0.0001",
+      TRUE ~ as.character(round(`P-value`, 4))
+    ),
+    `Adjusted P-value` = case_when(
+      `Adjusted P-value` < 0.0001 ~ "<0.0001",
+      TRUE ~ as.character(round(`Adjusted P-value`, 4))
+    )
+  )
+
+# View the result
+posthoc_watertemps
+posthoc_watertemps <- signif_df(posthoc_watertemps,3)
+
+  #adjust sig figs
+
+write.csv(posthoc_watertemps[,-c(1,9)],here("data/posthoc_watertemps.csv"))
 ```
 
 How does daily variability vary across sites? We examine only logger data since sst is alculated daily. Variance is only significantly diferent between 1 (bommie, backreef) and 5 (lagoon), with the lagoon having the most variance. However, the temperature vaiability or range is highest in the rubble site (3), which is signficantly more than the backreef and weakly with the lagoon (5)
@@ -1166,9 +1324,39 @@ geom_line()+theme_linedraw()+labs(fill="Logger",color="Logger",x="Date",y="Tempe
 
 
 kruskal.test(range~id,data=daily_vars_waterlogs)
-daily_vars_waterlogs %>%
+
+daily_vars_posthoc <- daily_vars_waterlogs %>%
   ungroup() %>%
   dunn_test(range ~ id)
+
+daily_vars_posthoc <- daily_vars_posthoc%>%
+  rename("Logger 1" = group1,
+         "Logger 2" = group2,
+         "n1" = n1,
+         "n2" = n2,
+         "Z Statistic" = statistic,
+         "P-value" = p,
+         "Adjusted P-value" = p.adj)
+
+daily_vars_posthoc <- daily_vars_posthoc %>%
+  mutate(
+    `P-value` = case_when(
+      `P-value` < 0.0001 ~ "<0.0001",
+      TRUE ~ as.character(round(`P-value`, 4))
+    ),
+    `Adjusted P-value` = case_when(
+      `Adjusted P-value` < 0.0001 ~ "<0.0001",
+      TRUE ~ as.character(round(`Adjusted P-value`, 4))
+    )
+  )
+
+# View the result
+daily_vars_posthoc
+posthoc_watertemps <- signif_df(daily_vars_posthoc,3)
+
+  #adjust sig figs
+
+write.csv(daily_vars_posthoc[,-c(1,9)],here("data/daily_vars_posthoc.csv"))
 ```
 
 Of course, once we include intertidal temperatures, it blows these comparisons out of the water.
